@@ -2028,6 +2028,179 @@ pub struct NaturalContinuation {
     max_fails: u32
 }
 
+
+impl NaturalContinuation {
+
+    /// Seed from already converged orbit point (e.g., one from the grid search)
+    pub fn new(seed: &ExtendedPoint, lambda0: f64, d_lambda: f64, period: usize) -> Self {
+        Self {
+            z: Vector4::new(seed.x, seed.y, seed.nx, seed.ny),
+            lambda: lambda0,
+            d_lambda,
+            period,
+            lambda_min: f64::NEG_INFINITY,
+            lambda_max: f64::INFINITY,
+            min_ds: 1e-5,
+            max_ds: 0.05,
+            max_correction: 0.15,
+            residual_threshold: DEFAULT_PERIODIC_RESIDUAL_THRESHOLD,
+            newton_tol: 1e-12,
+            consecutive_fails: 0,
+            max_fails: 6,
+        }
+    }
+
+    fn seed_point(&self) -> ExtendedPoint {
+        ExtendedPoint::new(self.z[0], self.z[1], self.z[2], self.z[3])
+    }
+
+    fn adapt_grow(&mut self) {
+        let sign = if self.d_lambda < 0.0 { -1.0 } else { 1.0 };
+        let mag = (self.d_lambda.abs() * 1.3).clamp(self.min_ds, self.max_ds);
+        self.d_lambda = sign * mag;
+    }
+
+    fn adapt_shink(&mut self) {
+        let sign = if self.d_lambda < 0.0 { -1.0 } else { 1.0 };
+        let mag = (self.d_lambda.abs() * 0.5).max(self.min_ds);
+        self.d_lambda = sign * mag;
+    }
+
+    /// Advance one step. `build_system(lambda)` must return the system with that 
+    /// parameter value baked in -- e.g., `|a| HenonMap::new(a, b, eps)`
+    pub fn step<S, F>(&mut self, build_system: &F) -> StepOutcome 
+    where 
+        S: DynamicalSystem,
+        F: Fn(f64) -> S,
+    {
+        let lambda_new = self.lambda + self.d_lambda;
+        if lambda_new < self.lambda_min || lambda_new > self.lambda_max {
+            return StepOutcome::OutOfRange;
+        }
+
+        let seed = self.seed_point();
+        let system = build_system(lambda_new);
+
+        // Predictor here simply is the last converged point, corrector 
+        // is the existing Davidchack-Lai solver, warm started from the seed.
+        let found = find_boundary_periodic_point_davidchack_lai_generic (
+            &system,
+            seed.x, 
+            seed.y,
+            seed.nx,
+            seed.ny,
+            self.period,
+            None, 
+            self.newton_max_iter,
+            self.newton_tol,
+            self.residual_threshold
+        );
+
+        match found {
+            Some(fp) if fp.is_finite() && fp.is_bounded(100.0) => {
+                // Reject corrections that are too far spatially
+                let dx = fp.x - seed.x 
+                let dy = fp.y - seed.y;
+                let moved = (dx * dx + dy * dy).sqrt();
+                if moved > self.max_correction {
+                    self.consecutive_fails += 1;
+                    self.adapt_shink();
+                    return if self.consecutive_fails >= self.max_fails {
+                        StepOutcome::NearFold
+                    } else {
+                        StepOutcome::Retry
+                    }
+                }
+                self.z = Vector4::new(fp.x, fp.y, fp.nx, fp.ny);
+                self.lambda = lambda_new;
+                self.consecutive_fails = 0;
+                self.adapt_grow();
+                StepOutcome::Converged
+            }
+            _ => {
+                self.consecutive_fails += 1;
+                self.adapt_shink();
+                if self.consecutive_fails >= self.max_fails {
+                    StepOutcome::NearFold
+                } else {
+                    StepOutcome::Retry
+                }
+            }
+        }
+
+    }
+
+    pub fn classify<S: DynamicalSystem>(&self, system: &S) -> (StabilityType, Vec<f64>) {
+        let (_, jac) = compose_boundary_map_n_times_generic(system, self.seed_point(), self.period);
+        classify_stability_4d(&jac)
+    }
+}
+
+
+#[derive(Debug, Clone)]
+pub struct BranchPoint {
+    pub lambda: f64,
+    pub point: ExtendedPoint,
+    pub period: usize,
+    pub stability: StabilityType,
+    pub eigenvalues: Vec<f64>
+}
+
+/// Follow one branch from `seed` in the `d_lambda` direction until it leaves 
+/// the range, stalls at a fold, or reaches `max_points`. Includes the seed.
+pub fn follow_branch<S, F>(
+    seed: &ExtendedPoint,
+    lambda0: f64,
+    d_lambda: f64,
+    period: usize,
+    lambda_min: f64,
+    lambda_max: f64,
+    max_points: usize,
+    build_system: &F
+) -> Vec<BranchPoint> where 
+    S: DynamicalSystem,
+    F: Fn(f64) -> S, 
+{
+    let mut cont = NaturalContinuation::new(seed, lambda0, d_lambda, period);
+    cont.lambda_min = lambda_min;
+    cont.lambda_max = lambda_max;
+
+    let mut branch = Vec::new();
+    {
+        let sys0 = build_system(lambda0);
+        let (stability, eigenvalues) = cont.classify(&sys0);
+        branch.push(BranchPoint {
+            lambda: lambda0,
+            point: *seed, 
+            period,
+            stability,
+            eigenvalues
+        });
+    }
+
+    for _ in 0..max_points{
+        match cont.step(build_system) {
+            StepOutcome::Converged => {
+                let sys = build_system(cont.lambda);
+                let (stability, eigevalues) = cont.classify(&sys);
+                branch.push(BranchPoint {
+                    lambda: cont.lambda,
+                    point: cont.seed_point(),
+                    period,
+                    stability,
+                    eigenvalues,
+                });
+            }
+            StepOutcome::Retry => continue,
+            StepOutcome::NearFold | StepOutcome::OutOfRange => break,
+        }
+    }
+    branch
+
+}
+
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
