@@ -4,7 +4,7 @@ use crate::dynamical_systems::{
 use crate::parameters::parameter_set_from_js;
 use crate::range::{clamp_pair, RANGE_LIMIT};
 use core::f64;
-use nalgebra::Vector2;
+use nalgebra::{Vector2, Vector4};
 use serde::{Deserialize, Serialize};
 use std::f64::consts::PI;
 use wasm_bindgen::prelude::*;
@@ -1980,6 +1980,52 @@ pub fn parameter_sweep_csv_wasm(
         y_max,
     );
     result.to_csv()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StepOutcome {
+    /// Corrector converged to a point on the same branch; lambda advanced
+    Converged,
+    /// Corrector failed (or jumped orbits), step shrunk, lambda not advanced
+    Retry, 
+    /// Repeated failures at small step 
+    NearFold,
+    /// Stepped past the requested [lambda_min, lambda_max] range
+    OutOfRange
+}
+
+
+/// Warm-started natural-parameter continuation for boundary-map periodic orbits
+/// Tracks a single orbit branch as `lambda` varies, reuse the existing 
+/// Davidchack-Lai corrector instead of rerunning the full grid search at 
+/// every parameter value. Between folds this is far cheaper than a fresh search;
+/// near a fold the corrector fails and the step shrinks; 
+
+pub struct NaturalContinuation {
+    /// Current converged boundary point (x, y, n_x, n_y)
+    pub z: Vector4<f64>,
+    /// Current parameter value
+    pub lambda: f64,
+    /// Signed step in lambda (negative will step downward)
+    pub d_lambda: f64,
+    /// Period of tracked orbit
+    pub period: usize,
+    /// Inclusive parameter bounds; continuation stops at crossing
+    pub lambda_min: f64,
+    pub lambda_max: f64,
+    /// Magnitude bounds for the adaptive step
+    pub min_ds: f64, 
+    pub max_ds: f64,
+    /// Reject a corrected point that moved farther than this from the seed
+    /// (guards against warm-start Newton jumping onto a different nearby orbit)
+    pub max_correction: f64,
+    /// Corrector settings, forwarded to the DavidchackLai solver
+    pub residual_threshold: f64,
+    pub newton_max_iter: usize, 
+    pub newton_tol: f64,
+
+    consecutive_fails: u32,
+    max_fails: u32
 }
 
 #[cfg(test)]
