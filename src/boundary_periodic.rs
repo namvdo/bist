@@ -4,7 +4,7 @@ use crate::dynamical_systems::{
 use crate::parameters::parameter_set_from_js;
 use crate::range::{clamp_pair, RANGE_LIMIT};
 use core::f64;
-use nalgebra::{Vector2, Vector4};
+use nalgebra::{Vector2, Vector4, Matrix5, Vector5};
 use serde::{Deserialize, Serialize};
 use std::f64::consts::PI;
 use wasm_bindgen::prelude::*;
@@ -1988,154 +1988,330 @@ pub enum StepOutcome {
     Converged,
     /// Corrector failed (or jumped orbits), step shrunk, lambda not advanced
     Retry, 
-    /// Repeated failures at small step 
-    NearFold,
+    /// Repeated failures even at minimum step 
+    Stalled,
     /// Stepped past the requested [lambda_min, lambda_max] range
     OutOfRange
 }
 
 
-/// Warm-started natural-parameter continuation for boundary-map periodic orbits
-/// Tracks a single orbit branch as `lambda` varies, reuse the existing 
-/// Davidchack-Lai corrector instead of rerunning the full grid search at 
-/// every parameter value. Between folds this is far cheaper than a fresh search;
-/// near a fold the corrector fails and the step shrinks; 
 
-pub struct NaturalContinuation {
-    /// Current converged boundary point (x, y, n_x, n_y)
-    pub z: Vector4<f64>,
-    /// Current parameter value
-    pub lambda: f64,
-    /// Signed step in lambda (negative will step downward)
-    pub d_lambda: f64,
-    /// Period of tracked orbit
-    pub period: usize,
-    /// Inclusive parameter bounds; continuation stops at crossing
-    pub lambda_min: f64,
-    pub lambda_max: f64,
-    /// Magnitude bounds for the adaptive step
-    pub min_ds: f64, 
-    pub max_ds: f64,
-    /// Reject a corrected point that moved farther than this from the seed
-    /// (guards against warm-start Newton jumping onto a different nearby orbit)
-    pub max_correction: f64,
-    /// Corrector settings, forwarded to the DavidchackLai solver
-    pub residual_threshold: f64,
-    pub newton_max_iter: usize, 
-    pub newton_tol: f64,
+/// Iterate boundary map p times and returns the final point 
+fn iterate_boundary_p(
+    system: &dyn DynamicalSystem,
+    z: ExtendedPoint,
+    p: usize
+) -> Option<ExtendedPoint> {
+    let mut cur = z; 
 
-    consecutive_fails: u32,
-    max_fails: u32
+    for _ in 0..p { 
+        cur = boundary_map_generic(system, cur.x, cur.y, cur.nx, cur.ny);
+        if !cur.is_finite() || !cur.is_bounded(1e10) {
+            return None 
+        }
+    }
+    Some(cur)
 }
 
 
-impl NaturalContinuation {
+/// At (z, lambda), return the period-p residual H = E^p(z) - z in R^4
+/// the state Jacobian D_zH = D_zE^p - I (4x4), and the parameter derivative
+/// D_λH = ∂E^p/∂λ in R^4 by central finite difference 
 
-    /// Seed from already converged orbit point (e.g., one from the grid search)
-    pub fn new(seed: &ExtendedPoint, lambda0: f64, d_lambda: f64, period: usize) -> Self {
-        Self {
-            z: Vector4::new(seed.x, seed.y, seed.nx, seed.ny),
-            lambda: lambda0,
-            d_lambda,
-            period,
-            lambda_min: f64::NEG_INFINITY,
-            lambda_max: f64::INFINITY,
-            min_ds: 1e-5,
-            max_ds: 0.05,
-            max_correction: 0.15,
-            residual_threshold: DEFAULT_PERIODIC_RESIDUAL_THRESHOLD,
-            newton_tol: 1e-12,
-            consecutive_fails: 0,
-            max_fails: 6,
-            newton_max_iter: 150,
+fn state_residual_jacobian<S, F>(
+    z: &Vector4<f64>,
+    lambda: f64, 
+    period: usize,
+    build_system: &F,
+    fd_h: f64
+) -> Option<(Vector4<f64>, Jacobian4x4, Vector4<f64>)> 
+where 
+    S: DynamicalSystem,
+    F: Fn(f64) -> S, 
+{
+    let system = build_system(lambda);
+    let zp = ExtendedPoint::new(z[0], z[1], z[2], z[3]);
+
+    let (mapped, dz_ep) = compose_boundary_map_n_times_generic(&system, zp, period);
+    if !mapped.is_finite() {
+        return None;
+    }
+
+    let h_res = Vector4::new(
+        mapped.x - zp.x, 
+        mapped.y - zp.y,
+        mapped.nx - zp.nx,
+        mapped.ny - zp.ny
+    );
+
+    let dz_h = dz_ep.subtract_identity();
+
+    let sys_p = build_system(lambda + fd_h);
+    let sys_m = build_system(lambda - fd_h);
+    let mp = iterate_boundary_p(&sys_p, zp, period)?;
+    let mm = iterate_boundary_p(&sys_m, zp, period)?;
+
+    let da_h = Vector4::new(
+        (mp.x - mm.x) / (2.0 * fd_h),
+        (mp.y - mm.y) / (2.0 * fd_h),
+        (mp.nx - mm.nx) / (2.0 * fd_h),
+        (mp.ny - mm.ny) / (2.0 * fd_h)
+    );
+
+    Some((h_res, dz_h, da_h))
+
+}
+
+
+/// Initial branch tangent from the natural-continuation formula
+fn initial_tangent(
+    dz_h: &Jacobian4x4,
+    da_h: &Vector4<f64>,
+    lambda_increasing: bool,
+) -> Option<Vector5<f64>> {
+    let inv = dz_h.inverse()?;
+    let mut v = [0.0f64;4];
+    for i in 0..4 {
+        let mut s = 0.0;
+        for j in 0..4 {
+            s += inv.data[i][j] * da_h[j];
         }
+        v[i] = -s;
     }
-
-    fn seed_point(&self) -> ExtendedPoint {
-        ExtendedPoint::new(self.z[0], self.z[1], self.z[2], self.z[3])
+    let mut t = Vector5::new(v[0], v[1], v[2], v[3], 1.0);
+    t /= t.norm();
+    if (t[4] > 0.0) != lambda_increasing {
+        t = -t;
     }
+    Some(t)
+}
 
-    fn adapt_grow(&mut self) {
-        let sign = if self.d_lambda < 0.0 { -1.0 } else { 1.0 };
-        let mag = (self.d_lambda.abs() * 1.3).clamp(self.min_ds, self.max_ds);
-        self.d_lambda = sign * mag;
+/// Next tangent via bordered system: solve [D_zH | D_lambdaH ; t_prev^T] t = e5,
+/// then normalize and orient to continue in the same direction as t_prev
+/// the border makes this solvable through a fold, where D_zH alone is singular
+fn compute_tangent(
+    dz_h: &Jacobian4x4,
+    da_h: &Vector4<f64>,
+    prev_tangent: &Vector5<f64>,
+) -> Option<Vector5<f64>> {
+    let mut m = Matrix5::<f64>::zeros();
+    for i in 0..4 {
+        for j in 0..4 {
+            m[(i, j)] = dz_h.data[i][j];
+        }
+        m[(i, 4)] = da_h[i]
     }
-
-    fn adapt_shink(&mut self) {
-        let sign = if self.d_lambda < 0.0 { -1.0 } else { 1.0 };
-        let mag = (self.d_lambda.abs() * 0.5).max(self.min_ds);
-        self.d_lambda = sign * mag;
+    for j in 0..5 {
+        m[(4, j)] = prev_tangent[j];
     }
+    let rhs = Vector5::new(0.0, 0.0, 0.0, 0.0, 1.0);
+    let t = m.lu().solve(&rhs)?;
+    if t.iter().any(|v| !v.is_finite() || t.norm() < 1e-30) {
+        return None;
+    }
+    let t = t / t.norm() ;
+    Some(if t.dot(prev_tangent) < 0.0 { -t } else { t } )
+}
 
-    /// Advance one step. `build_system(lambda)` must return the system with that 
-    /// parameter value baked in -- e.g., `|a| HenonMap::new(a, b, eps)`
-    pub fn step<S, F>(&mut self, build_system: &F) -> StepOutcome 
+/// Pseudo-arclength Keller continuation of the boundary map periodic orbits.
+/// 
+/// Parameterizes the branch by arclength s in the combined (z, λ) space, so λ is 
+/// a free unknown that may rise, peak, fall. The augmented 5x5 Newton system
+/// stays non-singular at a quadric fold - where natural continuation's 4x4 
+/// Dz_H block goes singular -- so it rounds saddle-node turning points (e.g., the 
+/// a ≈ 0.595 topological bifurcation) instead of stalling
+
+pub struct PseudoArclengthContinuation {
+    pub z: Vector4<f64>,
+    pub lambda: f64, 
+    /// Unit tangent (dz, dλ) in R^5 to to branch at the current point.
+    pub tangent: Vector5<f64>,
+    /// Arclength step magnitude (always > 0; direction lives in the tangent)
+    pub ds: f64,
+    pub period: usize,
+
+    pub lambda_min: f64,
+    pub lambda_max: f64,
+    pub min_ds: f64,
+    pub max_ds: f64,
+    pub residual_threshold: f64,
+    pub newton_max_iter: usize,
+    pub newton_tol: f64,
+    pub fd_h: f64,
+
+    consecutive_fails: u32,
+    max_fails: u32,
+}
+
+impl PseudoArclengthContinuation {
+    /// Seed from already converged orbit point. `lambda_increasing` sets the initial 
+    /// travel direction. `build_system(λ)` makes λ into a fresh system,
+    /// e.g., `|a| HenonSystem::new(a, b, eps)`
+    pub fn new<S, F>(
+        seed: &ExtendedPoint,
+        lambda0: f64,
+        ds: f64,
+        period: usize,
+        lambda_increasing: bool, 
+        build_system: &F
+    ) -> Option<Self>
     where 
         S: DynamicalSystem,
         F: Fn(f64) -> S,
     {
-        let lambda_new = self.lambda + self.d_lambda;
-        if lambda_new < self.lambda_min || lambda_new > self.lambda_max {
-            return StepOutcome::OutOfRange;
-        }
+        let z = Vector4::new(seed.x, seed.y, seed.nx, seed.ny);
+        let (_, dz_h, da_h) = state_residual_jacobian(&z, lambda0, period, build_system, 1e-6)?;
+        let tangent = initial_tangent(&dz_h, &da_h, lambda_increasing)?;
 
-        let seed = self.seed_point();
-        let system = build_system(lambda_new);
+        Some(Self {
+            z,
+            lambda: lambda0,
+            tangent, 
+            ds: ds.abs().max(1e-6),
+            period, 
+            lambda_min: f64::NEG_INFINITY,
+            lambda_max: f64::INFINITY,
+            min_ds: 1e-4,
+            max_ds: 0.05,
+            residual_threshold: DEFAULT_PERIODIC_RESIDUAL_THRESHOLD,
+            newton_max_iter: 50,
+            newton_tol: 1e-12,
+            fd_h: 1e-6,
+            consecutive_fails: 0,
+            max_fails: 8
+        })
+    }
 
-        // Predictor here simply is the last converged point, corrector 
-        // is the existing Davidchack-Lai solver, warm started from the seed.
-        let found = find_boundary_periodic_point_davidchack_lai_generic (
-            &system,
-            seed.x, 
-            seed.y,
-            seed.nx,
-            seed.ny,
-            self.period,
-            None, 
-            self.newton_max_iter,
-            self.newton_tol,
-            self.residual_threshold
-        );
+    pub fn seed_point(&self) -> ExtendedPoint {
+        ExtendedPoint::new(self.z[0], self.z[1], self.z[2], self.z[3])
+    }
 
-        match found {
-            Some(fp) if fp.is_finite() && fp.is_bounded(100.0) => {
-                // Reject corrections that are too far spatially
-                let dx = fp.x - seed.x;
-                let dy = fp.y - seed.y;
-                let moved = (dx * dx + dy * dy).sqrt();
-                if moved > self.max_correction {
-                    self.consecutive_fails += 1;
-                    self.adapt_shink();
-                    return if self.consecutive_fails >= self.max_fails {
-                        StepOutcome::NearFold
-                    } else {
-                        StepOutcome::Retry
-                    }
-                }
-                self.z = Vector4::new(fp.x, fp.y, fp.nx, fp.ny);
-                self.lambda = lambda_new;
-                self.consecutive_fails = 0;
-                self.adapt_grow();
-                StepOutcome::Converged
-            }
-            _ => {
-                self.consecutive_fails += 1;
-                self.adapt_shink();
-                if self.consecutive_fails >= self.max_fails {
-                    StepOutcome::NearFold
-                } else {
-                    StepOutcome::Retry
-                }
-            }
-        }
 
+    pub fn d_lambda_ds(&self) -> f64 { 
+        self.tangent[4]
     }
 
     pub fn classify<S: DynamicalSystem>(&self, system: &S) -> (StabilityType, Vec<f64>) {
         let (_, jac) = compose_boundary_map_n_times_generic(system, self.seed_point(), self.period);
         classify_stability_4d(&jac)
     }
+
+    /// One predictor-corrector step along the branch 
+    pub fn step<S, F>(&mut self, build_system: &F) -> StepOutcome 
+    where 
+        S: DynamicalSystem,
+        F: Fn(f64) -> S,
+    {
+        let w0 = Vector5::new(self.z[0], self.z[1], self.z[2], self.z[3], self.lambda);
+
+
+        // predictor: step ds along the unit tangent
+        let mut w = w0 + self.ds * self.tangent;
+
+        // corrector: Newton on [H_p(z, λ) = 0; t * (w - w0) - ds = 0]
+
+        let mut converged = false;
+        for _ in 0..self.newton_max_iter {
+            let z_cur = Vector4::new(w[0], w[1], w[2], w[3]);
+            let lam_cur = w[4];
+
+            let (h_res, dz_h, da_h) = match state_residual_jacobian(
+                &z_cur, 
+                lam_cur,
+                self.period,
+                build_system,
+                self.fd_h,
+            ) {
+                Some(v) => v,
+                None => break,
+            };
+
+            if h_res.norm() < self.residual_threshold { 
+                converged = true;
+                break;
+            }
+
+            let n_res = self.tangent.dot(&(w - w0)) - self.ds;
+            let r = Vector5::new(h_res[0], h_res[1], h_res[2], h_res[3], n_res);
+
+            // Augmented Jacobian: top-left D_zH, top-right D_λH, bottom row t^T
+            let mut jm = Matrix5::<f64>::zeros();
+            for i in 0..4 {
+                for j in 0..4 {
+                    jm[(i, j)] = dz_h.data[i][j];
+                }
+                jm[(i, 4)] = da_h[i];
+            }
+            for j in 0..5 {
+                jm[(4, j)] = self.tangent[j];
+            }
+
+            let dw = match jm.lu().solve(&(-r)) {
+                Some(d) => d,
+                None => break,
+            };
+
+            if dw.iter().any(|v| !v.is_finite()) {
+                break;
+            }
+
+            w += dw;
+
+            let nn = (w[2] * w[2] + w[3] * w[3]).sqrt();
+            if nn > 1e-12 {
+                w[2] /= nn;
+                w[3] /= nn;
+            }
+
+            if dw.norm() < self.newton_tol {
+                let z_chk = Vector4::new(w[0], w[1], w[2], w[3]);
+
+                if let Some((h2, _, _)) = state_residual_jacobian(
+                    &z_chk,
+                    w[4],
+                    self.period,
+                    build_system,
+                    self.fd_h
+                ) {
+                    converged = h2.norm() < self.residual_threshold;
+                }
+                break;
+            }
+        }
+
+        let z_new = ExtendedPoint::new(w[0], w[1], w[2], w[3]);
+        if !converged || !z_new.is_finite() || !z_new.is_bounded(100.0) {
+            self.consecutive_fails += 1;
+            self.ds = (self.ds * 0.5).max(self.min_ds);
+            return if self.consecutive_fails >= self.max_fails {
+                StepOutcome::Stalled
+            } else {
+                StepOutcome::Retry
+            };
+        }
+
+        if w[4] < self.lambda_min || w[4] > self.lambda_max {
+            return StepOutcome::OutOfRange;
+        }
+
+        let z_acc = Vector4::new(w[0], w[1], w[2], w[3]);
+        if let Some((_, dz_h, da_h))  = state_residual_jacobian(&z_acc, w[4], self.period, build_system, self.fd_h) {
+            if let Some(t_new) = compute_tangent(&dz_h, &da_h, &self.tangent) {
+                self.tangent = t_new;
+            }
+        }
+
+        self.z = z_acc;
+        self.lambda = w[4];
+        self.consecutive_fails = 0;
+        self.ds = (self.ds * 1.3).min(self.max_ds);
+        StepOutcome::Converged
+
+    }
+    
+    
 }
+
 
 
 #[derive(Debug, Clone)]
@@ -2144,60 +2320,66 @@ pub struct BranchPoint {
     pub point: ExtendedPoint,
     pub period: usize,
     pub stability: StabilityType,
-    pub eigenvalues: Vec<f64>
+    pub eigenvalues: Vec<f64>,
+    pub d_lambda_ds: f64,
 }
 
-/// Follow one branch from `seed` in the `d_lambda` direction until it leaves 
-/// the range, stalls at a fold, or reaches `max_points`. Includes the seed.
-pub fn follow_branch<S, F>(
-    seed: &ExtendedPoint,
-    lambda0: f64,
-    d_lambda: f64,
-    period: usize,
-    lambda_min: f64,
-    lambda_max: f64,
-    max_points: usize,
+fn record_branch_point<S, F> (
+    cont: &PseudoArclengthContinuation,
     build_system: &F
-) -> Vec<BranchPoint> where 
+) -> BranchPoint 
+where 
     S: DynamicalSystem,
     F: Fn(f64) -> S, 
 {
-    let mut cont = NaturalContinuation::new(seed, lambda0, d_lambda, period);
+    let sys = build_system(cont.lambda);
+    let (stability, eigenvalues) = cont.classify(&sys);
+    BranchPoint {
+        lambda: cont.lambda,
+        point: cont.seed_point(),
+        period: cont.period,
+        stability,
+        eigenvalues,
+        d_lambda_ds: cont.d_lambda_ds(),
+    }
+}
+
+/// Follow one branch from `seed` by arclength until it leaves [lambda_min,
+/// lambda_max], stalls, or hits `max_points`. Rounds folds; a saddle-node shows
+/// up as a sign flip of `d_lambda_ds` between consecutive returned points.
+pub fn follow_branch_arclength<S, F>(
+    seed: &ExtendedPoint,
+    lambda0: f64,
+    ds: f64,
+    period: usize,
+    lambda_increasing: bool,
+    lambda_min: f64,
+    lambda_max: f64,
+    max_points: usize,
+    build_system: &F,
+) -> Vec<BranchPoint>
+where
+    S: DynamicalSystem,
+    F: Fn(f64) -> S,
+{
+    let mut cont = match PseudoArclengthContinuation::new(
+        seed, lambda0, ds, period, lambda_increasing, build_system,
+    ) {
+        Some(c) => c,
+        None => return Vec::new(),
+    };
     cont.lambda_min = lambda_min;
     cont.lambda_max = lambda_max;
 
-    let mut branch = Vec::new();
-    {
-        let sys0 = build_system(lambda0);
-        let (stability, eigenvalues) = cont.classify(&sys0);
-        branch.push(BranchPoint {
-            lambda: lambda0,
-            point: *seed, 
-            period,
-            stability,
-            eigenvalues
-        });
-    }
-
-    for _ in 0..max_points{
+    let mut branch = vec![record_branch_point(&cont, build_system)];
+    for _ in 0..max_points {
         match cont.step(build_system) {
-            StepOutcome::Converged => {
-                let sys = build_system(cont.lambda);
-                let (stability, eigenvalues) = cont.classify(&sys);
-                branch.push(BranchPoint {
-                    lambda: cont.lambda,
-                    point: cont.seed_point(),
-                    period,
-                    stability,
-                    eigenvalues,
-                });
-            }
+            StepOutcome::Converged => branch.push(record_branch_point(&cont, build_system)),
             StepOutcome::Retry => continue,
-            StepOutcome::NearFold | StepOutcome::OutOfRange => break,
+            StepOutcome::Stalled | StepOutcome::OutOfRange => break,
         }
     }
     branch
-
 }
 
 
