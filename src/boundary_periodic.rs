@@ -2047,6 +2047,7 @@ impl NaturalContinuation {
             newton_tol: 1e-12,
             consecutive_fails: 0,
             max_fails: 6,
+            newton_max_iter: 150,
         }
     }
 
@@ -2099,7 +2100,7 @@ impl NaturalContinuation {
         match found {
             Some(fp) if fp.is_finite() && fp.is_bounded(100.0) => {
                 // Reject corrections that are too far spatially
-                let dx = fp.x - seed.x 
+                let dx = fp.x - seed.x;
                 let dy = fp.y - seed.y;
                 let moved = (dx * dx + dy * dy).sqrt();
                 if moved > self.max_correction {
@@ -2182,7 +2183,7 @@ pub fn follow_branch<S, F>(
         match cont.step(build_system) {
             StepOutcome::Converged => {
                 let sys = build_system(cont.lambda);
-                let (stability, eigevalues) = cont.classify(&sys);
+                let (stability, eigenvalues) = cont.classify(&sys);
                 branch.push(BranchPoint {
                     lambda: cont.lambda,
                     point: cont.seed_point(),
@@ -2199,6 +2200,28 @@ pub fn follow_branch<S, F>(
 
 }
 
+
+
+#[test]
+fn test_natural_continuation_tracks_fixed_point() {
+    let (b, eps) = (0.3, 0.01);
+    let build = |a| HenonSystem::new(a, b, eps);
+
+    let sys0 = build(1.4);
+    let db = find_all_boundary_periodic_orbits_generic(&sys0, 1, 15, 12, -3.0, 3.0, -3.0, 3.0);
+    let seed = db.orbits.iter().find(|o| o.period == 1)
+        .expect("a period-1 orbit at a = 1.4").extended_points[0];
+
+    let branch = follow_branch(&seed, 1.4, -0.02, 1, 0.5, 1.4, 200, &build);
+    assert!(branch.len() > 1, "continuation should produce multiple points");
+
+    for bp in &branch {
+        let sys = build(bp.lambda);
+        let m = boundary_map_generic(&sys, bp.point.x, bp.point.y, bp.point.nx, bp.point.ny);
+        let d = ((m.x - bp.point.x).powi(2) + (m.y - bp.point.y).powi(2)).sqrt();
+        assert!(d < 1e-6, "point at lambda={} not fixed (d={})", bp.lambda, d);
+    }
+}
 
 
 #[cfg(test)]
