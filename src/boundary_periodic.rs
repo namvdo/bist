@@ -960,7 +960,7 @@ fn find_boundary_periodic_point_davidchack_lai_generic(
     period: usize,
     beta: Option<f64>,
     max_iter: usize,
-    tol: f64, // tolerance for how small the correct step can be 
+    tol: f64, // tolerance for how small the correct step can be
     residual_threshold: f64,
 ) -> Option<ExtendedPoint> {
     let mut x = x0;
@@ -1694,8 +1694,9 @@ impl BoundaryUserDefinedSystemWasm {
             theta_grid_size.unwrap_or(DEFAULT_THETA_GRID_SIZE),
             DEFAULT_THETA_GRID_SIZE,
         );
-        let residual_threshold =
-            sanitize_residual_threshold(residual_threshold.unwrap_or(DEFAULT_PERIODIC_RESIDUAL_THRESHOLD));
+        let residual_threshold = sanitize_residual_threshold(
+            residual_threshold.unwrap_or(DEFAULT_PERIODIC_RESIDUAL_THRESHOLD),
+        );
         let orbit_database = davidchack_lai_boundary_map_generic(
             &system,
             max_period,
@@ -1973,7 +1974,10 @@ fn sanitize_hit_tolerance(value: f64) -> f64 {
     if !value.is_finite() || value <= 0.0 {
         return DEFAULT_HITTING_DISTANCE_TOLERANCE;
     }
-    value.clamp(MIN_HITTING_DISTANCE_TOLERANCE, MAX_HITTING_DISTANCE_TOLERANCE)
+    value.clamp(
+        MIN_HITTING_DISTANCE_TOLERANCE,
+        MAX_HITTING_DISTANCE_TOLERANCE,
+    )
 }
 
 fn build_henon_ulam_grid_and_measure(
@@ -1989,7 +1993,11 @@ fn build_henon_ulam_grid_and_measure(
 ) -> Result<(Grid, Vec<f64>), String> {
     let (x_min, x_max) = clamp_pair(x_min, x_max, RANGE_LIMIT);
     let (y_min, y_max) = clamp_pair(y_min, y_max, RANGE_LIMIT);
-    let grid = Grid::new(Vector2::new(x_min, y_min), Vector2::new(x_max, y_max), subdivisions);
+    let grid = Grid::new(
+        Vector2::new(x_min, y_min),
+        Vector2::new(x_max, y_max),
+        subdivisions,
+    );
     let n_boxes = grid.boxes.len();
     let samples_per_dim = (points_per_box as f64).sqrt().ceil().max(1.0) as usize;
     let mut transitions: HashMap<usize, Vec<(usize, f64)>> = HashMap::new();
@@ -2033,11 +2041,7 @@ fn build_henon_ulam_grid_and_measure(
         }
     }
 
-    let measure = UlamComputer::compute_right_eigenvector(
-        &transitions,
-        n_boxes,
-        iterations.max(1),
-    );
+    let measure = UlamComputer::compute_right_eigenvector(&transitions, n_boxes, iterations.max(1));
     Ok((grid, measure))
 }
 
@@ -2220,13 +2224,8 @@ fn compute_hitting_cells_for_targets(
                 let mut current = ExtendedPoint::from_angle(x, y, theta);
 
                 for level in 1..=max_level {
-                    current = boundary_map_generic(
-                        system,
-                        current.x,
-                        current.y,
-                        current.nx,
-                        current.ny,
-                    );
+                    current =
+                        boundary_map_generic(system, current.x, current.y, current.nx, current.ny);
                     if !current.is_finite() || !current.is_bounded(100.0) {
                         break;
                     }
@@ -2303,7 +2302,11 @@ pub fn compute_henon_hitting_level_sets(
     let sample_grid_size = sanitize_hitting_grid_size(sample_grid_size, 60);
     let theta_grid_size = sanitize_grid_size(theta_grid_size, DEFAULT_THETA_GRID_SIZE);
     let ulam_points_per_box = ulam_points_per_box.clamp(4, 256);
-    let ulam_iterations = if ulam_iterations == 0 { 20 } else { ulam_iterations.clamp(1, 100) };
+    let ulam_iterations = if ulam_iterations == 0 {
+        20
+    } else {
+        ulam_iterations.clamp(1, 100)
+    };
     let support_mass = sanitize_support_mass(support_mass);
     let hit_radius = sanitize_hit_tolerance(hit_tolerance);
     let residual_threshold = sanitize_residual_threshold(residual_threshold);
@@ -2492,14 +2495,8 @@ fn continue_henon_seed_to_target_arclength(
     residual_threshold: f64,
 ) -> Option<ExtendedPoint> {
     let build = |lambda: f64| lerp_henon_params(old_params, new_params, lambda);
-    let mut cont = PseudoArclengthContinuation::new::<HenonSystem, _>(
-        &seed,
-        0.0,
-        0.04,
-        period,
-        true,
-        &build,
-    )?;
+    let mut cont =
+        PseudoArclengthContinuation::new::<HenonSystem, _>(&seed, 0.0, 0.04, period, true, &build)?;
     cont.lambda_min = -0.05;
     cont.lambda_max = 1.05;
     cont.residual_threshold = residual_threshold;
@@ -2569,7 +2566,6 @@ fn continue_henon_seed_to_target_arclength(
     None
 }
 
-
 // simple continuation for Henon boundary map
 
 pub fn continue_henon_orbits_from_previous(
@@ -2605,21 +2601,17 @@ pub fn continue_henon_orbits_from_previous(
             continue;
         };
 
-        let corrected = correct_henon_seed_at_params(
-            seed,
-            orbit.period,
-            new_params,
-            residual_threshold,
-        )
-        .or_else(|| {
-            continue_henon_seed_to_target_arclength(
-                seed,
-                orbit.period,
-                old_params,
-                new_params,
-                residual_threshold,
-            )
-        });
+        let corrected =
+            correct_henon_seed_at_params(seed, orbit.period, new_params, residual_threshold)
+                .or_else(|| {
+                    continue_henon_seed_to_target_arclength(
+                        seed,
+                        orbit.period,
+                        old_params,
+                        new_params,
+                        residual_threshold,
+                    )
+                });
 
         if let Some(fp) = corrected {
             try_add_orbit_generic(
@@ -2822,47 +2814,44 @@ pub enum StepOutcome {
     /// Corrector converged to a point on the same branch; lambda advanced
     Converged,
     /// Corrector failed (or jumped orbits), step shrunk, lambda not advanced
-    Retry, 
-    /// Repeated failures even at minimum step 
+    Retry,
+    /// Repeated failures even at minimum step
     Stalled,
     /// Stepped past the requested [lambda_min, lambda_max] range
-    OutOfRange
+    OutOfRange,
 }
 
-
-
-/// Iterate boundary map p times and returns the final point 
+/// Iterate boundary map p times and returns the final point
 fn iterate_boundary_p(
     system: &dyn DynamicalSystem,
     z: ExtendedPoint,
-    p: usize
+    p: usize,
 ) -> Option<ExtendedPoint> {
-    let mut cur = z; 
+    let mut cur = z;
 
-    for _ in 0..p { 
+    for _ in 0..p {
         cur = boundary_map_generic(system, cur.x, cur.y, cur.nx, cur.ny);
         if !cur.is_finite() || !cur.is_bounded(1e10) {
-            return None 
+            return None;
         }
     }
     Some(cur)
 }
 
-
 /// At (z, lambda), return the period-p residual H = E^p(z) - z in R^4
 /// the state Jacobian D_zH = D_zE^p - I (4x4), and the parameter derivative
-/// D_λH = ∂E^p/∂λ in R^4 by central finite difference 
+/// D_λH = ∂E^p/∂λ in R^4 by central finite difference
 
 fn state_residual_jacobian<S, F>(
     z: &Vector4<f64>,
-    lambda: f64, 
+    lambda: f64,
     period: usize,
     build_system: &F,
-    fd_h: f64
-) -> Option<(Vector4<f64>, Jacobian4x4, Vector4<f64>)> 
-where 
+    fd_h: f64,
+) -> Option<(Vector4<f64>, Jacobian4x4, Vector4<f64>)>
+where
     S: DynamicalSystem,
-    F: Fn(f64) -> S, 
+    F: Fn(f64) -> S,
 {
     let system = build_system(lambda);
     let zp = ExtendedPoint::new(z[0], z[1], z[2], z[3]);
@@ -2873,10 +2862,10 @@ where
     }
 
     let h_res = Vector4::new(
-        mapped.x - zp.x, 
+        mapped.x - zp.x,
         mapped.y - zp.y,
         mapped.nx - zp.nx,
-        mapped.ny - zp.ny
+        mapped.ny - zp.ny,
     );
 
     let dz_h = dz_ep.subtract_identity();
@@ -2890,13 +2879,11 @@ where
         (mp.x - mm.x) / (2.0 * fd_h),
         (mp.y - mm.y) / (2.0 * fd_h),
         (mp.nx - mm.nx) / (2.0 * fd_h),
-        (mp.ny - mm.ny) / (2.0 * fd_h)
+        (mp.ny - mm.ny) / (2.0 * fd_h),
     );
 
     Some((h_res, dz_h, da_h))
-
 }
-
 
 /// Initial branch tangent from the natural-continuation formula
 fn initial_tangent(
@@ -2905,7 +2892,7 @@ fn initial_tangent(
     lambda_increasing: bool,
 ) -> Option<Vector5<f64>> {
     let inv = dz_h.inverse()?;
-    let mut v = [0.0f64;4];
+    let mut v = [0.0f64; 4];
     for i in 0..4 {
         let mut s = 0.0;
         for j in 0..4 {
@@ -2944,21 +2931,21 @@ fn compute_tangent(
     if t.iter().any(|v| !v.is_finite() || t.norm() < 1e-30) {
         return None;
     }
-    let t = t / t.norm() ;
-    Some(if t.dot(prev_tangent) < 0.0 { -t } else { t } )
+    let t = t / t.norm();
+    Some(if t.dot(prev_tangent) < 0.0 { -t } else { t })
 }
 
 /// Pseudo-arclength Keller continuation of the boundary map periodic orbits.
-/// 
-/// Parameterizes the branch by arclength s in the combined (z, λ) space, so λ is 
+///
+/// Parameterizes the branch by arclength s in the combined (z, λ) space, so λ is
 /// a free unknown that may rise, peak, fall. The augmented 5x5 Newton system
-/// stays non-singular at a quadric fold - where natural continuation's 4x4 
-/// Dz_H block goes singular -- so it rounds saddle-node turning points (e.g., the 
+/// stays non-singular at a quadric fold - where natural continuation's 4x4
+/// Dz_H block goes singular -- so it rounds saddle-node turning points (e.g., the
 /// a ≈ 0.595 topological bifurcation) instead of stalling
 
 pub struct PseudoArclengthContinuation {
     pub z: Vector4<f64>,
-    pub lambda: f64, 
+    pub lambda: f64,
     /// Unit tangent (dz, dλ) in R^5 to to branch at the current point.
     pub tangent: Vector5<f64>,
     /// Arclength step magnitude (always > 0; direction lives in the tangent)
@@ -2979,7 +2966,7 @@ pub struct PseudoArclengthContinuation {
 }
 
 impl PseudoArclengthContinuation {
-    /// Seed from already converged orbit point. `lambda_increasing` sets the initial 
+    /// Seed from already converged orbit point. `lambda_increasing` sets the initial
     /// travel direction. `build_system(λ)` makes λ into a fresh system,
     /// e.g., `|a| HenonSystem::new(a, b, eps)`
     pub fn new<S, F>(
@@ -2987,10 +2974,10 @@ impl PseudoArclengthContinuation {
         lambda0: f64,
         ds: f64,
         period: usize,
-        lambda_increasing: bool, 
-        build_system: &F
+        lambda_increasing: bool,
+        build_system: &F,
     ) -> Option<Self>
-    where 
+    where
         S: DynamicalSystem,
         F: Fn(f64) -> S,
     {
@@ -3001,9 +2988,9 @@ impl PseudoArclengthContinuation {
         Some(Self {
             z,
             lambda: lambda0,
-            tangent, 
+            tangent,
             ds: ds.abs().max(1e-6),
-            period, 
+            period,
             lambda_min: f64::NEG_INFINITY,
             lambda_max: f64::INFINITY,
             min_ds: 1e-4,
@@ -3013,7 +3000,7 @@ impl PseudoArclengthContinuation {
             newton_tol: 1e-12,
             fd_h: 1e-6,
             consecutive_fails: 0,
-            max_fails: 8
+            max_fails: 8,
         })
     }
 
@@ -3021,8 +3008,7 @@ impl PseudoArclengthContinuation {
         ExtendedPoint::new(self.z[0], self.z[1], self.z[2], self.z[3])
     }
 
-
-    pub fn d_lambda_ds(&self) -> f64 { 
+    pub fn d_lambda_ds(&self) -> f64 {
         self.tangent[4]
     }
 
@@ -3031,14 +3017,13 @@ impl PseudoArclengthContinuation {
         classify_stability_4d(&jac)
     }
 
-    /// One predictor-corrector step along the branch 
-    pub fn step<S, F>(&mut self, build_system: &F) -> StepOutcome 
-    where 
+    /// One predictor-corrector step along the branch
+    pub fn step<S, F>(&mut self, build_system: &F) -> StepOutcome
+    where
         S: DynamicalSystem,
         F: Fn(f64) -> S,
     {
         let w0 = Vector5::new(self.z[0], self.z[1], self.z[2], self.z[3], self.lambda);
-
 
         // predictor: step ds along the unit tangent
         let mut w = w0 + self.ds * self.tangent;
@@ -3051,7 +3036,7 @@ impl PseudoArclengthContinuation {
             let lam_cur = w[4];
 
             let (h_res, dz_h, da_h) = match state_residual_jacobian(
-                &z_cur, 
+                &z_cur,
                 lam_cur,
                 self.period,
                 build_system,
@@ -3101,13 +3086,9 @@ impl PseudoArclengthContinuation {
             if dw.norm() < self.newton_tol {
                 let z_chk = Vector4::new(w[0], w[1], w[2], w[3]);
 
-                if let Some((h2, _, _)) = state_residual_jacobian(
-                    &z_chk,
-                    w[4],
-                    self.period,
-                    build_system,
-                    self.fd_h
-                ) {
+                if let Some((h2, _, _)) =
+                    state_residual_jacobian(&z_chk, w[4], self.period, build_system, self.fd_h)
+                {
                     let n2 = self.tangent.dot(&(w - w0)) - self.ds;
                     converged = h2.norm() < self.residual_threshold && n2.abs() < self.newton_tol;
                 }
@@ -3131,7 +3112,9 @@ impl PseudoArclengthContinuation {
         }
 
         let z_acc = Vector4::new(w[0], w[1], w[2], w[3]);
-        if let Some((_, dz_h, da_h))  = state_residual_jacobian(&z_acc, w[4], self.period, build_system, self.fd_h) {
+        if let Some((_, dz_h, da_h)) =
+            state_residual_jacobian(&z_acc, w[4], self.period, build_system, self.fd_h)
+        {
             if let Some(t_new) = compute_tangent(&dz_h, &da_h, &self.tangent) {
                 self.tangent = t_new;
             }
@@ -3142,13 +3125,8 @@ impl PseudoArclengthContinuation {
         self.consecutive_fails = 0;
         self.ds = (self.ds * 1.3).min(self.max_ds);
         StepOutcome::Converged
-
     }
-    
-    
 }
-
-
 
 #[derive(Debug, Clone)]
 pub struct BranchPoint {
@@ -3160,13 +3138,10 @@ pub struct BranchPoint {
     pub d_lambda_ds: f64,
 }
 
-fn record_branch_point<S, F> (
-    cont: &PseudoArclengthContinuation,
-    build_system: &F
-) -> BranchPoint 
-where 
+fn record_branch_point<S, F>(cont: &PseudoArclengthContinuation, build_system: &F) -> BranchPoint
+where
     S: DynamicalSystem,
-    F: Fn(f64) -> S, 
+    F: Fn(f64) -> S,
 {
     let sys = build_system(cont.lambda);
     let (stability, eigenvalues) = cont.classify(&sys);
@@ -3199,7 +3174,12 @@ where
     F: Fn(f64) -> S,
 {
     let mut cont = match PseudoArclengthContinuation::new(
-        seed, lambda0, ds, period, lambda_increasing, build_system,
+        seed,
+        lambda0,
+        ds,
+        period,
+        lambda_increasing,
+        build_system,
     ) {
         Some(c) => c,
         None => return Vec::new(),
@@ -3218,8 +3198,6 @@ where
     branch
 }
 
-
-
 #[test]
 fn test_natural_continuation_tracks_fixed_point() {
     let (b, eps) = (0.3, 0.01);
@@ -3227,20 +3205,31 @@ fn test_natural_continuation_tracks_fixed_point() {
 
     let sys0 = build(1.4);
     let db = find_all_boundary_periodic_orbits_generic(&sys0, 1, 15, 12, -3.0, 3.0, -3.0, 3.0);
-    let seed = db.orbits.iter().find(|o| o.period == 1)
-        .expect("a period-1 orbit at a = 1.4").extended_points[0];
+    let seed = db
+        .orbits
+        .iter()
+        .find(|o| o.period == 1)
+        .expect("a period-1 orbit at a = 1.4")
+        .extended_points[0];
 
     let branch = follow_branch_arclength(&seed, 1.4, 0.02, 1, false, 0.5, 1.4, 200, &build);
-    assert!(branch.len() > 1, "continuation should produce multiple points");
+    assert!(
+        branch.len() > 1,
+        "continuation should produce multiple points"
+    );
 
     for bp in &branch {
         let sys = build(bp.lambda);
         let m = boundary_map_generic(&sys, bp.point.x, bp.point.y, bp.point.nx, bp.point.ny);
         let d = ((m.x - bp.point.x).powi(2) + (m.y - bp.point.y).powi(2)).sqrt();
-        assert!(d < 1e-6, "point at lambda={} not fixed (d={})", bp.lambda, d);
+        assert!(
+            d < 1e-6,
+            "point at lambda={} not fixed (d={})",
+            bp.lambda,
+            d
+        );
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -4018,6 +4007,53 @@ mod tests {
     }
 
     #[test]
+    fn test_henon_boundary_images_stay_in_ulam_support_after_seed() {
+        let system = HenonSystem::new(0.4, 0.3, 0.1);
+        let db =
+            find_all_boundary_periodic_orbits_generic(&system, 1, 15, 12, -3.0, 3.0, -3.0, 3.0);
+        assert_eq!(db.total_count(), 2);
+        assert!(
+            db.orbits
+                .iter()
+                .any(|o| matches!(o.stability, StabilityType::Saddle)),
+            "expected one saddle boundary fixed point"
+        );
+        assert!(
+            db.orbits
+                .iter()
+                .any(|o| matches!(o.stability, StabilityType::Stable)),
+            "expected one stable boundary fixed point"
+        );
+
+        let (grid, measure) =
+            build_henon_ulam_grid_and_measure(&system, 64, 64, 0.1, -3.0, 3.0, -3.0, 3.0, 100)
+                .expect("ulam support");
+
+        let mut point = ExtendedPoint::new(0.1, 0.1, 1.0, 0.0);
+        let seed_idx = grid
+            .search(&Vector2::new(point.x, point.y))
+            .expect("seed is inside display grid");
+        assert_eq!(
+            measure[seed_idx], 0.0,
+            "the arbitrary seed is not itself on the invariant boundary support"
+        );
+
+        for iter in 1..=1000 {
+            point = boundary_map_generic(&system, point.x, point.y, point.nx, point.ny);
+            let idx = grid
+                .search(&Vector2::new(point.x, point.y))
+                .unwrap_or_else(|| {
+                    panic!("boundary image {iter} left the display grid: {point:?}")
+                });
+            assert!(
+                measure[idx] > 1e-10,
+                "boundary image {iter} left Ulam support: point={point:?}, mass={}",
+                measure[idx]
+            );
+        }
+    }
+
+    #[test]
     fn test_sweep_and_viz_grid_consistency() {
         // Verify that the sweep finds the same orbits as the visualization
         // at a given parameter value, since they now use the same grid size
@@ -4221,18 +4257,21 @@ mod tests {
 
     #[test]
     fn test_hitting_support_selects_cumulative_mass_with_safety_dilation() {
-        let measure = vec![
-            0.0, 0.0, 0.0,
-            0.0, 0.98, 0.0,
-            0.0, 0.02, 0.0,
-        ];
+        let measure = vec![0.0, 0.0, 0.0, 0.0, 0.98, 0.0, 0.0, 0.02, 0.0];
 
         let (active, threshold) = select_active_ulam_boxes(&measure, 3, 0.95);
 
         assert!((threshold - 0.98).abs() < 1e-12);
         assert!(active.contains(&4), "central high-mass box must be active");
-        assert!(active.contains(&0), "one-cell safety dilation should include diagonal neighbors");
-        assert_eq!(active.len(), 9, "central support dilation should cover the 3x3 grid");
+        assert!(
+            active.contains(&0),
+            "one-cell safety dilation should include diagonal neighbors"
+        );
+        assert_eq!(
+            active.len(),
+            9,
+            "central support dilation should cover the 3x3 grid"
+        );
     }
 
     #[test]
@@ -4270,16 +4309,7 @@ mod tests {
         ];
 
         let (cells, levels_present, level_counts) = compute_hitting_cells_for_targets(
-            &system,
-            &targets,
-            0.0,
-            1.0,
-            0.0,
-            1.0,
-            1,
-            1,
-            2,
-            1e-10,
+            &system, &targets, 0.0, 1.0, 0.0, 1.0, 1, 1, 2, 1e-10,
         );
 
         assert_eq!(cells.len(), 1);

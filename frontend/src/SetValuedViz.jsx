@@ -11,6 +11,10 @@ import {
 } from './utils/periodicSearchSettings';
 import { applyStartPointUpdate } from './utils/startPointState';
 import {
+    appendTrajectoryHistoryPoint,
+    shouldRecordTrajectoryHistoryPoint
+} from './utils/trajectoryState';
+import {
     DEFAULT_HITTING_CONTOUR_STATE,
     getHittingTargetContours,
     getStabilityColorHex,
@@ -1987,10 +1991,17 @@ const SetValuedViz = () => {
             nextPoint = boundary_map(x, y, nx, ny, params.a, params.b, params.epsilon);
         }
 
+        const isContinuousStep = dynamicSystem === 'duffing_ode' || dynamicSystem === 'custom_ode';
         setManifoldState(prev => ({
             ...prev,
             currentPoint: { x: nextPoint.x, y: nextPoint.y, nx: nextPoint.nx, ny: nextPoint.ny },
-            trajectoryPoints: [...prev.trajectoryPoints, { x, y, nx, ny }],
+            trajectoryPoints: appendTrajectoryHistoryPoint({
+                points: prev.trajectoryPoints,
+                point: { x, y, nx, ny },
+                iteration: prev.iteration,
+                isContinuous: isContinuousStep,
+                maxHistory: 1000
+            }),
             iteration: prev.iteration + 1,
             hasStarted: true
         }));
@@ -2063,10 +2074,12 @@ const SetValuedViz = () => {
                     return;
                 }
 
-                if (isContinuous && newPoints.length >= 1000) {
-                    newPoints.shift();
+                if (shouldRecordTrajectoryHistoryPoint({ isContinuous, iteration })) {
+                    if (isContinuous && newPoints.length >= 1000) {
+                        newPoints.shift();
+                    }
+                    newPoints.push({ x: currentX, y: currentY, nx: currentNx, ny: currentNy });
                 }
-                newPoints.push({ x: currentX, y: currentY, nx: currentNx, ny: currentNy });
 
                 const next = stepFn(currentX, currentY, currentNx, currentNy);
                 if (!next) {

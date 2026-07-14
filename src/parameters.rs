@@ -47,11 +47,15 @@ impl ParameterSet {
             });
         }
 
-        Ok(Self { entries: normalized })
+        Ok(Self {
+            entries: normalized,
+        })
     }
 
     pub fn empty() -> Self {
-        Self { entries: Vec::new() }
+        Self {
+            entries: Vec::new(),
+        }
     }
 
     pub fn entries(&self) -> &[ParameterEntry] {
@@ -67,7 +71,9 @@ pub fn parameter_set_from_js(params: JsValue) -> Result<ParameterSet, String> {
 
 fn is_valid_identifier(name: &str) -> bool {
     let mut chars = name.chars();
-    let Some(first) = chars.next() else { return false; };
+    let Some(first) = chars.next() else {
+        return false;
+    };
     if !(first.is_ascii_alphabetic() || first == '_') {
         return false;
     }
@@ -77,15 +83,7 @@ fn is_valid_identifier(name: &str) -> bool {
 fn is_reserved_param(name: &str) -> bool {
     matches!(
         name,
-        "x"
-            | "y"
-            | "sin"
-            | "cos"
-            | "tan"
-            | "abs"
-            | "sqrt"
-            | "exp"
-            | "ln"
+        "x" | "y" | "sin" | "cos" | "tan" | "abs" | "sqrt" | "exp" | "ln"
     )
 }
 

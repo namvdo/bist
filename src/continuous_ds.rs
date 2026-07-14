@@ -4,10 +4,10 @@ use wasm_bindgen::prelude::*;
 
 use crate::dynamical_systems::{DynamicalSystem, ExtendedState};
 use crate::parameters::{parameter_set_from_js, ParameterSet};
-use crate::user_defined::ParsedEquations;
 use crate::unstable_manifold::{
     ManifoldConfig, SaddlePoint, SaddleType, StopReason, Trajectory, UnstableManifoldComputer,
 };
+use crate::user_defined::ParsedEquations;
 
 #[wasm_bindgen]
 extern "C" {
@@ -137,9 +137,8 @@ impl OdeSystem for UserDefinedOdeSystem {
 
     fn jacobian(&self, pos: Vector2<f64>) -> Matrix2<f64> {
         let h = 1e-5;
-        let eval = |x: f64, y: f64| -> (f64, f64) {
-            self.equations.eval(x, y).unwrap_or((0.0, 0.0))
-        };
+        let eval =
+            |x: f64, y: f64| -> (f64, f64) { self.equations.eval(x, y).unwrap_or((0.0, 0.0)) };
 
         let (fx1, fy1) = eval(pos.x + h, pos.y);
         let (fx2, fy2) = eval(pos.x - h, pos.y);
@@ -607,10 +606,9 @@ impl BdeSimulatorUserDefinedWasm {
         r: f64,
         num_points: usize,
     ) -> Result<BdeSimulatorUserDefinedWasm, JsValue> {
-        let param_set =
-            parameter_set_from_js(params).map_err(|e| JsValue::from_str(&e))?;
-        let ode = UserDefinedOdeSystem::new(x_eq, y_eq, param_set)
-            .map_err(|e| JsValue::from_str(&e))?;
+        let param_set = parameter_set_from_js(params).map_err(|e| JsValue::from_str(&e))?;
+        let ode =
+            UserDefinedOdeSystem::new(x_eq, y_eq, param_set).map_err(|e| JsValue::from_str(&e))?;
 
         Ok(BdeSimulatorUserDefinedWasm {
             sim: BdeSimulator::new(ode, epsilon, cx, cy, r, num_points),
@@ -756,8 +754,7 @@ mod tests {
         ])
         .unwrap();
 
-        let ode =
-            UserDefinedOdeSystem::new("a * x + b * y + c", "d * x + e * y", params).unwrap();
+        let ode = UserDefinedOdeSystem::new("a * x + b * y + c", "d * x + e * y", params).unwrap();
 
         let pos = Vector2::new(2.0, -1.0);
         let val = ode.vector_field(pos).unwrap();
@@ -967,8 +964,7 @@ pub fn evaluate_user_defined_ode(
     y_eq: &str,
     params: JsValue,
 ) -> Result<JsValue, JsValue> {
-    let param_set =
-        parameter_set_from_js(params).map_err(|e| JsValue::from_str(&e))?;
+    let param_set = parameter_set_from_js(params).map_err(|e| JsValue::from_str(&e))?;
     let ode = UserDefinedOdeSystem::new(x_eq, y_eq, param_set)
         .map_err(|e| JsValue::from_str(&format!("Error parsing equations: {}", e)))?;
 
@@ -997,8 +993,7 @@ pub fn boundary_map_user_defined_ode(
     h: f64,
     epsilon: f64,
 ) -> Result<JsValue, JsValue> {
-    let param_set =
-        parameter_set_from_js(params).map_err(|e| JsValue::from_str(&e))?;
+    let param_set = parameter_set_from_js(params).map_err(|e| JsValue::from_str(&e))?;
     let ode = UserDefinedOdeSystem::new(x_eq, y_eq, param_set)
         .map_err(|e| JsValue::from_str(&format!("Error parsing equations: {}", e)))?;
 

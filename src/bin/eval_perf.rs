@@ -203,9 +203,7 @@ fn benchmark_manifold_case(
                 }
             }
         }
-        Err(err) => {
-            (0.0, json!({ "error": err }))
-        }
+        Err(err) => (0.0, json!({ "error": err })),
     };
 
     PerfRecord {
@@ -333,9 +331,10 @@ fn benchmark_duffing_rk4_case(
             };
             (duration_ms, output)
         }
-        Err(err) => {
-            (0.0, json!({ "status": "error", "error": err, "steps_completed": 0 }))
-        }
+        Err(err) => (
+            0.0,
+            json!({ "status": "error", "error": err, "steps_completed": 0 }),
+        ),
     };
 
     PerfRecord {
