@@ -16,6 +16,8 @@ describe('ManifoldsPanel', () => {
   const defaultManifoldState = {
     showUnstableManifold: false,
     showStableManifold: false,
+    showNormalFan: false,
+    normalFanCount: 8,
     showRepellerManifold: false,
     intersectionThreshold: 0.05,
     intersections: [],
@@ -33,6 +35,35 @@ describe('ManifoldsPanel', () => {
 
     expect(screen.getByText('Unstable manifold')).toBeInTheDocument();
     expect(screen.getByText('Stable manifold')).toBeInTheDocument();
+    expect(screen.getByText('Normal directions')).toBeInTheDocument();
+  });
+
+  it('shows normal fan controls when enabled', () => {
+    const setManifoldState = vi.fn();
+    render(
+      <ManifoldsPanel
+        manifoldState={{ ...defaultManifoldState, showNormalFan: true }}
+        setManifoldState={setManifoldState}
+        ORBIT_COLORS={ORBIT_COLORS}
+      />
+    );
+
+    expect(screen.getByText('Directions')).toBeInTheDocument();
+    expect(screen.getByText('Click the viewport to move the base point.')).toBeInTheDocument();
+  });
+
+  it('updates the normal fan direction count', () => {
+    const setManifoldState = vi.fn();
+    render(
+      <ManifoldsPanel
+        manifoldState={{ ...defaultManifoldState, showNormalFan: true }}
+        setManifoldState={setManifoldState}
+        ORBIT_COLORS={ORBIT_COLORS}
+      />
+    );
+
+    fireEvent.change(screen.getAllByDisplayValue('8')[0], { target: { value: '12' } });
+    expect(setManifoldState.mock.calls[0][0](defaultManifoldState).normalFanCount).toBe(12);
   });
 
   it('renders fixed point classification legend', () => {

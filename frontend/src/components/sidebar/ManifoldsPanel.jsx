@@ -20,6 +20,30 @@ export const ManifoldsPanel = ({ manifoldState, setManifoldState, ORBIT_COLORS }
         onChange={(v) => setManifoldState(prev => ({ ...prev, showStableManifold: v }))}
       />
 
+      <Toggle
+        label="Normal directions"
+        colorLine="#ddd5c8"
+        checked={manifoldState.showNormalFan}
+        onChange={(v) => setManifoldState(prev => ({ ...prev, showNormalFan: v }))}
+      />
+
+      {manifoldState.showNormalFan && (
+        <div style={{ marginTop: '8px' }}>
+          <Slider
+            label="Directions"
+            hint="normals"
+            min={4}
+            max={32}
+            step={2}
+            value={manifoldState.normalFanCount || 8}
+            onChange={v => setManifoldState(prev => ({ ...prev, normalFanCount: v }))}
+          />
+          <div className="normal-fan-note">
+            Click the viewport to move the base point.
+          </div>
+        </div>
+      )}
+
       {manifoldState.showStableManifold && (
         <div id="intersect-panel" style={{ marginTop: '8px' }}>
           <Slider

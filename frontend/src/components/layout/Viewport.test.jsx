@@ -13,6 +13,7 @@ const baseProps = {
     showOrbits: false
   },
   ulamState: { showUlamOverlay: false },
+  hittingContourState: { showOverlay: false },
   handleZoomIn: vi.fn(),
   handleZoomOut: vi.fn(),
   handleResetView: vi.fn(),

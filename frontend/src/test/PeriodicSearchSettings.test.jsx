@@ -22,4 +22,9 @@ describe('normalizePeriodicSearchSettings', () => {
 
     expect(normalized.residualThreshold).toBe(1e-10);
   });
+
+  it('normalizes the optional continuation flag', () => {
+    expect(normalizePeriodicSearchSettings({ useContinuation: true }).useContinuation).toBe(true);
+    expect(normalizePeriodicSearchSettings({ useContinuation: false }, { useContinuation: true }).useContinuation).toBe(false);
+  });
 });

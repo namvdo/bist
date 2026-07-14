@@ -3,9 +3,11 @@ use crate::dynamical_systems::{
 };
 use crate::parameters::parameter_set_from_js;
 use crate::range::{clamp_pair, RANGE_LIMIT};
+use crate::ulam::{Grid, UlamComputer};
 use core::f64;
-use nalgebra::{Vector2, Vector4, Matrix5, Vector5};
+use nalgebra::{Matrix5, Vector2, Vector4, Vector5};
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 use std::f64::consts::PI;
 use wasm_bindgen::prelude::*;
 #[cfg(target_arch = "wasm32")]
@@ -958,7 +960,7 @@ fn find_boundary_periodic_point_davidchack_lai_generic(
     period: usize,
     beta: Option<f64>,
     max_iter: usize,
-    tol: f64,
+    tol: f64, // tolerance for how small the correct step can be 
     residual_threshold: f64,
 ) -> Option<ExtendedPoint> {
     let mut x = x0;
@@ -1040,6 +1042,9 @@ fn find_boundary_periodic_point_davidchack_lai_generic(
         ny += dny;
 
         let norm = (nx * nx + ny * ny).sqrt();
+        if norm <= 1e-12 || !norm.is_finite() {
+            return None;
+        }
         nx /= norm;
         ny /= norm;
 
@@ -1191,6 +1196,9 @@ fn try_add_orbit_generic(
     period: usize,
     residual_threshold: f64,
 ) -> bool {
+    if !fp.is_finite() {
+        return false;
+    }
     if !fp.is_bounded(100.0) {
         return false;
     }
@@ -1434,8 +1442,13 @@ pub fn parameter_sweep_henon_fast(
 
         let a = get_param("a", sweep_param_name, sweep_val);
         let b = get_param("b", sweep_param_name, sweep_val);
+        let epsilon_at_sample = if sweep_param_name == "epsilon" {
+            sweep_val
+        } else {
+            epsilon
+        };
 
-        let system = HenonSystem::new(a, b, epsilon);
+        let system = HenonSystem::new(a, b, epsilon_at_sample);
         let db = find_all_boundary_periodic_orbits_generic(
             &system,
             max_period,
@@ -1834,7 +1847,829 @@ impl ParameterSweepResult {
     }
 }
 
+const DEFAULT_HITTING_SUPPORT_MASS: f64 = 0.995;
+const DEFAULT_HITTING_DISTANCE_TOLERANCE: f64 = 1e-2;
+const MIN_HITTING_DISTANCE_TOLERANCE: f64 = 1e-12;
+const MAX_HITTING_DISTANCE_TOLERANCE: f64 = 1e-1;
+const MAX_HITTING_PERIOD: usize = 10;
+const MAX_HITTING_LEVEL: usize = 10;
+const MAX_HITTING_GRID_SIZE: usize = 180;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HittingLevelHit {
+    pub level: usize,
+    pub target_index: usize,
+    pub orbit_index: usize,
+    pub point_index: usize,
+    pub period: usize,
+    pub stability: String,
+    pub distance: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HittingLevelCell {
+    pub index: usize,
+    pub x: f64,
+    pub y: f64,
+    pub best_level: usize,
+    pub hits: Vec<HittingLevelHit>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HittingLevelTarget {
+    pub target_index: usize,
+    pub orbit_index: usize,
+    pub point_index: usize,
+    pub x: f64,
+    pub y: f64,
+    pub nx: f64,
+    pub ny: f64,
+    pub period: usize,
+    pub stability: String,
+    pub eigenvalues: Vec<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HittingLevelSettings {
+    pub max_period: usize,
+    pub max_level: usize,
+    pub ulam_subdivisions: usize,
+    pub ulam_points_per_box: usize,
+    pub ulam_iterations: usize,
+    pub support_mass: f64,
+    pub support_threshold: f64,
+    pub theta_grid_size: usize,
+    pub sample_grid_size: usize,
+    pub hit_radius: f64,
+    pub residual_threshold: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HittingLevelSummary {
+    pub active_boxes: usize,
+    pub total_boxes: usize,
+    pub orbit_count: usize,
+    pub target_count: usize,
+    pub hit_cell_count: usize,
+    pub total_hits: usize,
+    pub level_counts: Vec<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HittingLevelResult {
+    pub cells: Vec<HittingLevelCell>,
+    pub targets: Vec<HittingLevelTarget>,
+    pub levels_present: Vec<usize>,
+    pub settings: HittingLevelSettings,
+    pub summary: HittingLevelSummary,
+}
+
+#[derive(Debug, Clone)]
+struct HittingTargetInternal {
+    target_index: usize,
+    orbit_index: usize,
+    point_index: usize,
+    point: ExtendedPoint,
+    period: usize,
+    stability: StabilityType,
+    eigenvalues: Vec<f64>,
+}
+
+fn sanitize_hitting_grid_size(value: usize, fallback: usize) -> usize {
+    if value == 0 {
+        return fallback;
+    }
+    value.clamp(2, MAX_HITTING_GRID_SIZE)
+}
+
+fn sanitize_hitting_period(value: usize) -> usize {
+    if value == 0 {
+        return MAX_HITTING_PERIOD;
+    }
+    value.clamp(1, MAX_HITTING_PERIOD)
+}
+
+fn sanitize_hitting_level(value: usize) -> usize {
+    if value == 0 {
+        return MAX_HITTING_LEVEL;
+    }
+    value.clamp(1, MAX_HITTING_LEVEL)
+}
+
+fn sanitize_support_mass(value: f64) -> f64 {
+    if !value.is_finite() || value <= 0.0 {
+        return DEFAULT_HITTING_SUPPORT_MASS;
+    }
+    value.clamp(0.80, 0.9999)
+}
+
+fn sanitize_hit_tolerance(value: f64) -> f64 {
+    if !value.is_finite() || value <= 0.0 {
+        return DEFAULT_HITTING_DISTANCE_TOLERANCE;
+    }
+    value.clamp(MIN_HITTING_DISTANCE_TOLERANCE, MAX_HITTING_DISTANCE_TOLERANCE)
+}
+
+fn build_henon_ulam_grid_and_measure(
+    system: &HenonSystem,
+    subdivisions: usize,
+    points_per_box: usize,
+    epsilon: f64,
+    x_min: f64,
+    x_max: f64,
+    y_min: f64,
+    y_max: f64,
+    iterations: usize,
+) -> Result<(Grid, Vec<f64>), String> {
+    let (x_min, x_max) = clamp_pair(x_min, x_max, RANGE_LIMIT);
+    let (y_min, y_max) = clamp_pair(y_min, y_max, RANGE_LIMIT);
+    let grid = Grid::new(Vector2::new(x_min, y_min), Vector2::new(x_max, y_max), subdivisions);
+    let n_boxes = grid.boxes.len();
+    let samples_per_dim = (points_per_box as f64).sqrt().ceil().max(1.0) as usize;
+    let mut transitions: HashMap<usize, Vec<(usize, f64)>> = HashMap::new();
+
+    for source in 0..n_boxes {
+        let rect = &grid.boxes[source];
+        let center = Vector2::new(rect.center.0, rect.center.1);
+        let radius = Vector2::new(rect.radius.0, rect.radius.1);
+        let mut counts: HashMap<usize, usize> = HashMap::new();
+
+        for sy in 0..samples_per_dim {
+            for sx in 0..samples_per_dim {
+                let tx = if samples_per_dim > 1 {
+                    -1.0 + 2.0 * (sx as f64) / ((samples_per_dim - 1) as f64)
+                } else {
+                    0.0
+                };
+                let ty = if samples_per_dim > 1 {
+                    -1.0 + 2.0 * (sy as f64) / ((samples_per_dim - 1) as f64)
+                } else {
+                    0.0
+                };
+                let sample = Vector2::new(center.x + tx * radius.x, center.y + ty * radius.y);
+                let mapped = system.map(sample)?;
+                let intersecting = grid.find_intersecting_boxes(&mapped, epsilon);
+                for target in intersecting {
+                    *counts.entry(target).or_insert(0) += 1;
+                }
+            }
+        }
+
+        if !counts.is_empty() {
+            let total = counts.values().sum::<usize>() as f64;
+            transitions.insert(
+                source,
+                counts
+                    .into_iter()
+                    .map(|(target, count)| (target, count as f64 / total))
+                    .collect(),
+            );
+        }
+    }
+
+    let measure = UlamComputer::compute_right_eigenvector(
+        &transitions,
+        n_boxes,
+        iterations.max(1),
+    );
+    Ok((grid, measure))
+}
+
+fn dilate_grid_indices(indices: &HashSet<usize>, subdivisions: usize) -> HashSet<usize> {
+    let mut dilated = indices.clone();
+    let n = subdivisions as isize;
+    for &idx in indices {
+        let ix = (idx % subdivisions) as isize;
+        let iy = (idx / subdivisions) as isize;
+        for dy in -1..=1 {
+            for dx in -1..=1 {
+                let nx = ix + dx;
+                let ny = iy + dy;
+                if nx >= 0 && nx < n && ny >= 0 && ny < n {
+                    dilated.insert((ny as usize) * subdivisions + (nx as usize));
+                }
+            }
+        }
+    }
+    dilated
+}
+
+fn select_active_ulam_boxes(
+    measure: &[f64],
+    subdivisions: usize,
+    support_mass: f64,
+) -> (HashSet<usize>, f64) {
+    let n_boxes = measure.len();
+    if n_boxes == 0 || subdivisions == 0 {
+        return (HashSet::new(), 0.0);
+    }
+
+    let total_mass = measure.iter().sum::<f64>();
+    if total_mass <= 1e-15 {
+        return ((0..n_boxes).collect(), 0.0);
+    }
+
+    let target_mass = sanitize_support_mass(support_mass) * total_mass;
+    let mut ranked: Vec<(usize, f64)> = measure.iter().copied().enumerate().collect();
+    ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    let mut active = HashSet::new();
+    let mut accumulated = 0.0;
+    let mut threshold = 0.0;
+
+    for (idx, mass) in ranked {
+        if mass <= 0.0 && !active.is_empty() {
+            break;
+        }
+        active.insert(idx);
+        accumulated += mass;
+        threshold = mass;
+        if accumulated >= target_mass {
+            break;
+        }
+    }
+
+    if active.is_empty() {
+        if let Some((idx, mass)) = measure
+            .iter()
+            .copied()
+            .enumerate()
+            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+        {
+            active.insert(idx);
+            threshold = mass;
+        }
+    }
+
+    (dilate_grid_indices(&active, subdivisions), threshold)
+}
+
+fn find_boundary_periodic_orbits_from_active_boxes(
+    system: &HenonSystem,
+    grid: &Grid,
+    active_boxes: &HashSet<usize>,
+    max_period: usize,
+    theta_grid_size: usize,
+    residual_threshold: f64,
+) -> PeriodicOrbitDatabase {
+    let mut database = PeriodicOrbitDatabase::new();
+    let mut active: Vec<usize> = active_boxes.iter().copied().collect();
+    active.sort_unstable();
+
+    for period in 1..=max_period {
+        for idx in &active {
+            let Some(rect) = grid.boxes.get(*idx) else {
+                continue;
+            };
+            let x0 = rect.center.0;
+            let y0 = rect.center.1;
+            for k in 0..theta_grid_size {
+                let theta = 2.0 * PI * (k as f64 + 0.5) / (theta_grid_size as f64);
+                if let Some(fp) = find_boundary_periodic_point_davidchack_lai_generic(
+                    system,
+                    x0,
+                    y0,
+                    theta.cos(),
+                    theta.sin(),
+                    period,
+                    None,
+                    150,
+                    1e-12,
+                    residual_threshold,
+                ) {
+                    try_add_orbit_generic(system, &mut database, fp, period, residual_threshold);
+                }
+            }
+        }
+    }
+
+    database
+}
+
+fn flatten_hitting_targets(database: &PeriodicOrbitDatabase) -> Vec<HittingTargetInternal> {
+    let mut targets = Vec::new();
+    for (orbit_index, orbit) in database.orbits.iter().enumerate() {
+        for (point_index, point) in orbit.extended_points.iter().copied().enumerate() {
+            targets.push(HittingTargetInternal {
+                target_index: targets.len(),
+                orbit_index,
+                point_index,
+                point,
+                period: orbit.period,
+                stability: orbit.stability,
+                eigenvalues: orbit.eigenvalues.clone(),
+            });
+        }
+    }
+    targets
+}
+
+fn target_to_js(target: &HittingTargetInternal) -> HittingLevelTarget {
+    HittingLevelTarget {
+        target_index: target.target_index,
+        orbit_index: target.orbit_index,
+        point_index: target.point_index,
+        x: target.point.x,
+        y: target.point.y,
+        nx: target.point.nx,
+        ny: target.point.ny,
+        period: target.period,
+        stability: String::from(&target.stability),
+        eigenvalues: target.eigenvalues.clone(),
+    }
+}
+
+fn compute_hitting_cells_for_targets(
+    system: &HenonSystem,
+    targets: &[HittingTargetInternal],
+    x_min: f64,
+    x_max: f64,
+    y_min: f64,
+    y_max: f64,
+    sample_grid_size: usize,
+    theta_grid_size: usize,
+    max_level: usize,
+    hit_radius: f64,
+) -> (Vec<HittingLevelCell>, Vec<usize>, Vec<usize>) {
+    let dx = (x_max - x_min) / (sample_grid_size as f64);
+    let dy = (y_max - y_min) / (sample_grid_size as f64);
+    let hit_radius_sq = hit_radius * hit_radius;
+    let mut cells = Vec::new();
+    let mut level_counts = vec![0usize; max_level + 1];
+    let mut levels_present = HashSet::new();
+
+    if targets.is_empty() || dx <= 0.0 || dy <= 0.0 {
+        return (cells, Vec::new(), level_counts);
+    }
+
+    for iy in 0..sample_grid_size {
+        for ix in 0..sample_grid_size {
+            let x = x_min + dx * (ix as f64 + 0.5);
+            let y = y_min + dy * (iy as f64 + 0.5);
+            let mut hits = Vec::new();
+            let mut seen = HashSet::new();
+
+            for k in 0..theta_grid_size {
+                let theta = 2.0 * PI * (k as f64 + 0.5) / (theta_grid_size as f64);
+                let mut current = ExtendedPoint::from_angle(x, y, theta);
+
+                for level in 1..=max_level {
+                    current = boundary_map_generic(
+                        system,
+                        current.x,
+                        current.y,
+                        current.nx,
+                        current.ny,
+                    );
+                    if !current.is_finite() || !current.is_bounded(100.0) {
+                        break;
+                    }
+
+                    for target in targets {
+                        let dist_sq = (current.x - target.point.x).powi(2)
+                            + (current.y - target.point.y).powi(2);
+                        if dist_sq <= hit_radius_sq {
+                            let key = (level, target.target_index);
+                            if seen.insert(key) {
+                                hits.push(HittingLevelHit {
+                                    level,
+                                    target_index: target.target_index,
+                                    orbit_index: target.orbit_index,
+                                    point_index: target.point_index,
+                                    period: target.period,
+                                    stability: String::from(&target.stability),
+                                    distance: dist_sq.sqrt(),
+                                });
+                                level_counts[level] += 1;
+                                levels_present.insert(level);
+                            }
+                        }
+                    }
+                }
+            }
+
+            if !hits.is_empty() {
+                hits.sort_by(|a, b| {
+                    a.level
+                        .cmp(&b.level)
+                        .then(a.orbit_index.cmp(&b.orbit_index))
+                        .then(a.point_index.cmp(&b.point_index))
+                });
+                let best_level = hits.first().map(|hit| hit.level).unwrap_or(max_level);
+                cells.push(HittingLevelCell {
+                    index: iy * sample_grid_size + ix,
+                    x,
+                    y,
+                    best_level,
+                    hits,
+                });
+            }
+        }
+    }
+
+    let mut sorted_levels: Vec<usize> = levels_present.into_iter().collect();
+    sorted_levels.sort_unstable();
+    (cells, sorted_levels, level_counts)
+}
+
+pub fn compute_henon_hitting_level_sets(
+    a: f64,
+    b: f64,
+    epsilon: f64,
+    x_min: f64,
+    x_max: f64,
+    y_min: f64,
+    y_max: f64,
+    max_period: usize,
+    ulam_subdivisions: usize,
+    ulam_points_per_box: usize,
+    ulam_iterations: usize,
+    support_mass: f64,
+    theta_grid_size: usize,
+    sample_grid_size: usize,
+    max_level: usize,
+    hit_tolerance: f64,
+    residual_threshold: f64,
+) -> Result<HittingLevelResult, String> {
+    let max_period = sanitize_hitting_period(max_period);
+    let max_level = sanitize_hitting_level(max_level);
+    let ulam_subdivisions = sanitize_hitting_grid_size(ulam_subdivisions, 40);
+    let sample_grid_size = sanitize_hitting_grid_size(sample_grid_size, 60);
+    let theta_grid_size = sanitize_grid_size(theta_grid_size, DEFAULT_THETA_GRID_SIZE);
+    let ulam_points_per_box = ulam_points_per_box.clamp(4, 256);
+    let ulam_iterations = if ulam_iterations == 0 { 20 } else { ulam_iterations.clamp(1, 100) };
+    let support_mass = sanitize_support_mass(support_mass);
+    let hit_radius = sanitize_hit_tolerance(hit_tolerance);
+    let residual_threshold = sanitize_residual_threshold(residual_threshold);
+    let (x_min, x_max) = clamp_pair(x_min, x_max, RANGE_LIMIT);
+    let (y_min, y_max) = clamp_pair(y_min, y_max, RANGE_LIMIT);
+    let system = HenonSystem::new(a, b, epsilon);
+
+    let (ulam_grid, measure) = build_henon_ulam_grid_and_measure(
+        &system,
+        ulam_subdivisions,
+        ulam_points_per_box,
+        epsilon,
+        x_min,
+        x_max,
+        y_min,
+        y_max,
+        ulam_iterations,
+    )?;
+    let (active_boxes, support_threshold) =
+        select_active_ulam_boxes(&measure, ulam_subdivisions, support_mass);
+
+    let orbit_database = find_boundary_periodic_orbits_from_active_boxes(
+        &system,
+        &ulam_grid,
+        &active_boxes,
+        max_period,
+        theta_grid_size,
+        residual_threshold,
+    );
+    let targets_internal = flatten_hitting_targets(&orbit_database);
+    let targets: Vec<HittingLevelTarget> = targets_internal.iter().map(target_to_js).collect();
+
+    let (cells, levels_present, level_counts) = compute_hitting_cells_for_targets(
+        &system,
+        &targets_internal,
+        x_min,
+        x_max,
+        y_min,
+        y_max,
+        sample_grid_size,
+        theta_grid_size,
+        max_level,
+        hit_radius,
+    );
+    let total_hits = cells.iter().map(|cell| cell.hits.len()).sum();
+    let hit_cell_count = cells.len();
+
+    Ok(HittingLevelResult {
+        cells,
+        targets,
+        levels_present,
+        settings: HittingLevelSettings {
+            max_period,
+            max_level,
+            ulam_subdivisions,
+            ulam_points_per_box,
+            ulam_iterations,
+            support_mass,
+            support_threshold,
+            theta_grid_size,
+            sample_grid_size,
+            hit_radius,
+            residual_threshold,
+        },
+        summary: HittingLevelSummary {
+            active_boxes: active_boxes.len(),
+            total_boxes: measure.len(),
+            orbit_count: orbit_database.total_count(),
+            target_count: targets_internal.len(),
+            hit_cell_count,
+            total_hits,
+            level_counts,
+        },
+    })
+}
+
+#[wasm_bindgen(js_name = "computeHenonHittingLevelSets")]
+pub fn compute_henon_hitting_level_sets_wasm(
+    a: f64,
+    b: f64,
+    epsilon: f64,
+    x_min: f64,
+    x_max: f64,
+    y_min: f64,
+    y_max: f64,
+    max_period: usize,
+    ulam_subdivisions: usize,
+    ulam_points_per_box: usize,
+    ulam_iterations: usize,
+    support_mass: f64,
+    theta_grid_size: usize,
+    sample_grid_size: usize,
+    max_level: usize,
+    hit_tolerance: f64,
+    residual_threshold: f64,
+) -> Result<JsValue, JsValue> {
+    console_error_panic_hook::set_once();
+    let result = compute_henon_hitting_level_sets(
+        a,
+        b,
+        epsilon,
+        x_min,
+        x_max,
+        y_min,
+        y_max,
+        max_period,
+        ulam_subdivisions,
+        ulam_points_per_box,
+        ulam_iterations,
+        support_mass,
+        theta_grid_size,
+        sample_grid_size,
+        max_level,
+        hit_tolerance,
+        residual_threshold,
+    )
+    .map_err(|e| JsValue::from_str(&e))?;
+
+    serde_wasm_bindgen::to_value(&result)
+        .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+}
+
+#[derive(Debug, Clone, Copy)]
+struct HenonContinuationParams {
+    a: f64,
+    b: f64,
+    epsilon: f64,
+}
+
+fn lerp_henon_params(
+    old_params: HenonContinuationParams,
+    new_params: HenonContinuationParams,
+    lambda: f64,
+) -> HenonSystem {
+    HenonSystem::new(
+        old_params.a + (new_params.a - old_params.a) * lambda,
+        old_params.b + (new_params.b - old_params.b) * lambda,
+        old_params.epsilon + (new_params.epsilon - old_params.epsilon) * lambda,
+    )
+}
+
+fn normalize_vector4_normal(z: &mut Vector4<f64>) -> bool {
+    let norm = (z[2] * z[2] + z[3] * z[3]).sqrt();
+    if norm <= 1e-12 || !norm.is_finite() {
+        return false;
+    }
+    z[2] /= norm;
+    z[3] /= norm;
+    true
+}
+
+fn found_orbit_seed(orbit: &FoundPeriodicOrbit) -> Option<ExtendedPoint> {
+    orbit
+        .extended_points
+        .first()
+        .map(|&(x, y, nx, ny)| ExtendedPoint::new(x, y, nx, ny))
+        .filter(ExtendedPoint::is_finite)
+}
+
+fn correct_henon_seed_at_params(
+    seed: ExtendedPoint,
+    period: usize,
+    params: HenonContinuationParams,
+    residual_threshold: f64,
+) -> Option<ExtendedPoint> {
+    let system = HenonSystem::new(params.a, params.b, params.epsilon);
+    find_boundary_periodic_point_davidchack_lai_generic(
+        &system,
+        seed.x,
+        seed.y,
+        seed.nx,
+        seed.ny,
+        period,
+        None,
+        80,
+        1e-12,
+        residual_threshold,
+    )
+}
+
+fn continue_henon_seed_to_target_arclength(
+    seed: ExtendedPoint,
+    period: usize,
+    old_params: HenonContinuationParams,
+    new_params: HenonContinuationParams,
+    residual_threshold: f64,
+) -> Option<ExtendedPoint> {
+    let build = |lambda: f64| lerp_henon_params(old_params, new_params, lambda);
+    let mut cont = PseudoArclengthContinuation::new::<HenonSystem, _>(
+        &seed,
+        0.0,
+        0.04,
+        period,
+        true,
+        &build,
+    )?;
+    cont.lambda_min = -0.05;
+    cont.lambda_max = 1.05;
+    cont.residual_threshold = residual_threshold;
+    cont.newton_max_iter = 40;
+    cont.newton_tol = 1e-11;
+    cont.min_ds = 1e-4;
+    cont.max_ds = 0.08;
+    cont.max_fails = 10;
+
+    let mut previous_lambda = cont.lambda;
+    let mut previous_z = cont.z;
+    let mut closest_lambda = cont.lambda;
+    let mut closest_z = cont.z;
+
+    for _ in 0..120 {
+        match cont.step::<HenonSystem, _>(&build) {
+            StepOutcome::Converged => {
+                let current_lambda = cont.lambda;
+                let current_z = cont.z;
+                if (current_lambda - 1.0).abs() < (closest_lambda - 1.0).abs() {
+                    closest_lambda = current_lambda;
+                    closest_z = current_z;
+                }
+
+                let crossed_target = (previous_lambda - 1.0) * (current_lambda - 1.0) <= 0.0
+                    && (current_lambda - previous_lambda).abs() > 1e-12;
+                if crossed_target {
+                    let alpha = (1.0 - previous_lambda) / (current_lambda - previous_lambda);
+                    let mut z_target = previous_z + (current_z - previous_z) * alpha;
+                    if !normalize_vector4_normal(&mut z_target) {
+                        return None;
+                    }
+                    let target_seed =
+                        ExtendedPoint::new(z_target[0], z_target[1], z_target[2], z_target[3]);
+                    return correct_henon_seed_at_params(
+                        target_seed,
+                        period,
+                        new_params,
+                        residual_threshold,
+                    );
+                }
+
+                if current_lambda > 1.05 {
+                    break;
+                }
+                previous_lambda = current_lambda;
+                previous_z = current_z;
+            }
+            StepOutcome::Retry => continue,
+            StepOutcome::Stalled | StepOutcome::OutOfRange => break,
+        }
+    }
+
+    if (closest_lambda - 1.0).abs() <= 0.05 {
+        if normalize_vector4_normal(&mut closest_z) {
+            let target_seed =
+                ExtendedPoint::new(closest_z[0], closest_z[1], closest_z[2], closest_z[3]);
+            return correct_henon_seed_at_params(
+                target_seed,
+                period,
+                new_params,
+                residual_threshold,
+            );
+        }
+    }
+
+    None
+}
+
+
+// simple continuation for Henon boundary map
+
+pub fn continue_henon_orbits_from_previous(
+    previous_orbits: &[FoundPeriodicOrbit],
+    old_a: f64,
+    old_b: f64,
+    old_epsilon: f64,
+    new_a: f64,
+    new_b: f64,
+    new_epsilon: f64,
+    max_period: usize,
+    residual_threshold: f64,
+) -> PeriodicOrbitDatabase {
+    let residual_threshold = sanitize_residual_threshold(residual_threshold);
+    let old_params = HenonContinuationParams {
+        a: old_a,
+        b: old_b,
+        epsilon: old_epsilon,
+    };
+    let new_params = HenonContinuationParams {
+        a: new_a,
+        b: new_b,
+        epsilon: new_epsilon,
+    };
+    let new_system = HenonSystem::new(new_a, new_b, new_epsilon);
+    let mut database = PeriodicOrbitDatabase::new();
+
+    for orbit in previous_orbits {
+        if orbit.period == 0 || orbit.period > max_period {
+            continue;
+        }
+        let Some(seed) = found_orbit_seed(orbit) else {
+            continue;
+        };
+
+        let corrected = correct_henon_seed_at_params(
+            seed,
+            orbit.period,
+            new_params,
+            residual_threshold,
+        )
+        .or_else(|| {
+            continue_henon_seed_to_target_arclength(
+                seed,
+                orbit.period,
+                old_params,
+                new_params,
+                residual_threshold,
+            )
+        });
+
+        if let Some(fp) = corrected {
+            try_add_orbit_generic(
+                &new_system,
+                &mut database,
+                fp,
+                orbit.period,
+                residual_threshold,
+            );
+        }
+    }
+
+    database
+}
+
 // WASM
+
+#[wasm_bindgen(js_name = "continueBoundaryHenonOrbits")]
+pub fn continue_boundary_henon_orbits_wasm(
+    previous_orbits_js: JsValue,
+    old_a: f64,
+    old_b: f64,
+    old_epsilon: f64,
+    new_a: f64,
+    new_b: f64,
+    new_epsilon: f64,
+    max_period: usize,
+    residual_threshold: f64,
+) -> Result<JsValue, JsValue> {
+    console_error_panic_hook::set_once();
+
+    let previous_orbits: Vec<FoundPeriodicOrbit> =
+        serde_wasm_bindgen::from_value(previous_orbits_js)
+            .map_err(|e| JsValue::from_str(&format!("Failed to parse previous orbits: {}", e)))?;
+
+    let db = continue_henon_orbits_from_previous(
+        &previous_orbits,
+        old_a,
+        old_b,
+        old_epsilon,
+        new_a,
+        new_b,
+        new_epsilon,
+        max_period,
+        residual_threshold,
+    );
+    let orbits = database_to_found_orbits_generic(&db);
+    serde_wasm_bindgen::to_value(&orbits)
+        .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+}
 
 #[wasm_bindgen(js_name = "parameterSweep")]
 pub fn parameter_sweep_wasm(
@@ -2226,12 +3061,12 @@ impl PseudoArclengthContinuation {
                 None => break,
             };
 
-            if h_res.norm() < self.residual_threshold { 
+            let n_res = self.tangent.dot(&(w - w0)) - self.ds;
+            if h_res.norm() < self.residual_threshold && n_res.abs() < self.newton_tol {
                 converged = true;
                 break;
             }
 
-            let n_res = self.tangent.dot(&(w - w0)) - self.ds;
             let r = Vector5::new(h_res[0], h_res[1], h_res[2], h_res[3], n_res);
 
             // Augmented Jacobian: top-left D_zH, top-right D_λH, bottom row t^T
@@ -2273,7 +3108,8 @@ impl PseudoArclengthContinuation {
                     build_system,
                     self.fd_h
                 ) {
-                    converged = h2.norm() < self.residual_threshold;
+                    let n2 = self.tangent.dot(&(w - w0)) - self.ds;
+                    converged = h2.norm() < self.residual_threshold && n2.abs() < self.newton_tol;
                 }
                 break;
             }
@@ -2394,7 +3230,7 @@ fn test_natural_continuation_tracks_fixed_point() {
     let seed = db.orbits.iter().find(|o| o.period == 1)
         .expect("a period-1 orbit at a = 1.4").extended_points[0];
 
-    let branch = follow_branch(&seed, 1.4, -0.02, 1, 0.5, 1.4, 200, &build);
+    let branch = follow_branch_arclength(&seed, 1.4, 0.02, 1, false, 0.5, 1.4, 200, &build);
     assert!(branch.len() > 1, "continuation should produce multiple points");
 
     for bp in &branch {
@@ -3116,6 +3952,32 @@ mod tests {
     }
 
     #[test]
+    fn test_hitting_level_hit_radius_is_configurable() {
+        let result = compute_henon_hitting_level_sets(
+            1.4,
+            0.3,
+            0.01,
+            -1.5,
+            1.5,
+            -1.5,
+            1.5,
+            1,
+            10,
+            4,
+            1,
+            0.8,
+            1,
+            10,
+            1,
+            1e-4,
+            DEFAULT_PERIODIC_RESIDUAL_THRESHOLD,
+        )
+        .expect("hitting-level computation should complete for minimal settings");
+
+        assert_eq!(result.settings.hit_radius, 1e-4);
+    }
+
+    #[test]
     fn test_henon_unique_orbit_count_at_typical_params() {
         // At a=0.4, b=0.3, epsilon=0.1, the Hénon boundary map should find
         // a small number of distinct orbits (not duplicates)
@@ -3194,6 +4056,130 @@ mod tests {
     }
 
     #[test]
+    fn test_continue_henon_orbits_tracks_parameter_shift() {
+        let old_system = HenonSystem::new(0.4, 0.3, 0.1);
+        let old_db =
+            find_all_boundary_periodic_orbits_generic(&old_system, 1, 10, 8, -3.0, 3.0, -3.0, 3.0);
+        let previous = database_to_found_orbits_generic(&old_db);
+
+        let continued = continue_henon_orbits_from_previous(
+            &previous,
+            0.4,
+            0.3,
+            0.1,
+            0.42,
+            0.3,
+            0.1,
+            1,
+            DEFAULT_PERIODIC_RESIDUAL_THRESHOLD,
+        );
+
+        assert!(
+            continued.total_count() > 0,
+            "Continuation should retain at least one fixed point after a small a-shift"
+        );
+
+        let new_system = HenonSystem::new(0.42, 0.3, 0.1);
+        for orbit in &continued.orbits {
+            let point = orbit.extended_points[0];
+            let mapped = boundary_map_generic(&new_system, point.x, point.y, point.nx, point.ny);
+            let residual = (mapped.x - point.x).powi(2)
+                + (mapped.y - point.y).powi(2)
+                + (mapped.nx - point.nx).powi(2)
+                + (mapped.ny - point.ny).powi(2);
+            assert!(
+                residual < 1e-12,
+                "Continued orbit is not periodic at the new parameter, residual={}",
+                residual
+            );
+        }
+    }
+
+    #[test]
+    fn test_continue_henon_orbits_tracks_epsilon_shift() {
+        let old_system = HenonSystem::new(0.4, 0.3, 0.08);
+        let old_db =
+            find_all_boundary_periodic_orbits_generic(&old_system, 1, 10, 8, -3.0, 3.0, -3.0, 3.0);
+        let previous = database_to_found_orbits_generic(&old_db);
+
+        let continued = continue_henon_orbits_from_previous(
+            &previous,
+            0.4,
+            0.3,
+            0.08,
+            0.4,
+            0.3,
+            0.1,
+            1,
+            DEFAULT_PERIODIC_RESIDUAL_THRESHOLD,
+        );
+
+        assert!(
+            continued.total_count() > 0,
+            "Continuation should retain at least one fixed point after a small epsilon-shift"
+        );
+    }
+
+    #[test]
+    fn test_henon_sweep_applies_epsilon_samples() {
+        let base_params = vec![("a".to_string(), 0.4), ("b".to_string(), 0.3)];
+        let low_eps = parameter_sweep_henon_fast(
+            &base_params,
+            "epsilon",
+            0.05,
+            0.05,
+            1,
+            0.1,
+            1,
+            10,
+            8,
+            -3.0,
+            3.0,
+            -3.0,
+            3.0,
+        );
+        let high_eps = parameter_sweep_henon_fast(
+            &base_params,
+            "epsilon",
+            0.12,
+            0.12,
+            1,
+            0.1,
+            1,
+            10,
+            8,
+            -3.0,
+            3.0,
+            -3.0,
+            3.0,
+        );
+
+        assert_eq!(low_eps.results.len(), 1);
+        assert_eq!(high_eps.results.len(), 1);
+        assert!((low_eps.results[0].param_value - 0.05).abs() < 1e-12);
+        assert!((high_eps.results[0].param_value - 0.12).abs() < 1e-12);
+
+        let low_first = low_eps.results[0]
+            .orbits
+            .first()
+            .and_then(|orbit| orbit.extended_points.first())
+            .copied();
+        let high_first = high_eps.results[0]
+            .orbits
+            .first()
+            .and_then(|orbit| orbit.extended_points.first())
+            .copied();
+
+        if let (Some(low), Some(high)) = (low_first, high_first) {
+            let position_delta = ((low.0 - high.0).powi(2) + (low.1 - high.1).powi(2)).sqrt();
+            assert!(
+                position_delta > 1e-5,
+                "Sweeping epsilon should change the computed boundary orbit"
+            );
+        }
+    }
+
+    #[test]
     fn test_periodic_search_input_sanitization() {
         assert_eq!(
             sanitize_grid_size(0, DEFAULT_PERIODIC_GRID_SIZE),
@@ -3231,5 +4217,77 @@ mod tests {
             loose.total_count() > 0,
             "Expected at least one orbit with loose threshold"
         );
+    }
+
+    #[test]
+    fn test_hitting_support_selects_cumulative_mass_with_safety_dilation() {
+        let measure = vec![
+            0.0, 0.0, 0.0,
+            0.0, 0.98, 0.0,
+            0.0, 0.02, 0.0,
+        ];
+
+        let (active, threshold) = select_active_ulam_boxes(&measure, 3, 0.95);
+
+        assert!((threshold - 0.98).abs() < 1e-12);
+        assert!(active.contains(&4), "central high-mass box must be active");
+        assert!(active.contains(&0), "one-cell safety dilation should include diagonal neighbors");
+        assert_eq!(active.len(), 9, "central support dilation should cover the 3x3 grid");
+    }
+
+    #[test]
+    fn test_hitting_cells_record_multiple_levels_for_same_sample() {
+        let system = HenonSystem::new(0.4, 0.3, 0.05);
+        let seed = ExtendedPoint::from_angle(0.5, 0.5, PI);
+        let level_one = boundary_map_generic(&system, seed.x, seed.y, seed.nx, seed.ny);
+        let level_two = boundary_map_generic(
+            &system,
+            level_one.x,
+            level_one.y,
+            level_one.nx,
+            level_one.ny,
+        );
+
+        let targets = vec![
+            HittingTargetInternal {
+                target_index: 0,
+                orbit_index: 0,
+                point_index: 0,
+                point: level_one,
+                period: 1,
+                stability: StabilityType::Saddle,
+                eigenvalues: vec![],
+            },
+            HittingTargetInternal {
+                target_index: 1,
+                orbit_index: 1,
+                point_index: 0,
+                point: level_two,
+                period: 2,
+                stability: StabilityType::Stable,
+                eigenvalues: vec![],
+            },
+        ];
+
+        let (cells, levels_present, level_counts) = compute_hitting_cells_for_targets(
+            &system,
+            &targets,
+            0.0,
+            1.0,
+            0.0,
+            1.0,
+            1,
+            1,
+            2,
+            1e-10,
+        );
+
+        assert_eq!(cells.len(), 1);
+        assert_eq!(levels_present, vec![1, 2]);
+        assert_eq!(level_counts[1], 1);
+        assert_eq!(level_counts[2], 1);
+        assert_eq!(cells[0].hits.len(), 2);
+        assert_eq!(cells[0].hits[0].level, 1);
+        assert_eq!(cells[0].hits[1].level, 2);
     }
 }

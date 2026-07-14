@@ -1,10 +1,12 @@
 import React from 'react';
 import { Collapsible } from '../ui/Collapsible';
+import { Toggle } from '../ui/Toggle';
 
 export const PeriodicSearchPanel = ({
   dynamicSystem,
   periodicSearchSettings,
   updatePeriodicSearchSettings,
+  periodicState,
   disabled
 }) => {
   const supportsBoundarySearchSettings = dynamicSystem === 'henon' || dynamicSystem === 'custom';
@@ -24,6 +26,18 @@ export const PeriodicSearchPanel = ({
   const updateResidualThreshold = (e) => {
     updatePeriodicSearchSettings?.({ residualThreshold: Number(e.target.value) });
   };
+
+  const updateUseContinuation = (value) => {
+    updatePeriodicSearchSettings?.({ useContinuation: value });
+  };
+
+  const showContinuationControls = dynamicSystem === 'henon';
+  const computeMethod = periodicState?.computeMethod;
+  const methodLabel = computeMethod === 'continuation'
+    ? 'Last run used continuation'
+    : computeMethod === 'grid'
+      ? 'Last run used grid search'
+      : 'Next run will use grid search';
 
   return (
     <Collapsible title="Periodic search" defaultOpen={true}>
@@ -68,6 +82,19 @@ export const PeriodicSearchPanel = ({
           />
         </div>
       </div>
+      {showContinuationControls && (
+        <>
+          <Toggle
+            label="Use continuation"
+            checked={Boolean(periodicSearchSettings?.useContinuation)}
+            onChange={updateUseContinuation}
+            disabled={disabled}
+          />
+          <div className="periodic-search-hint">
+            {methodLabel}. Enable continuation to track existing Hénon orbits after parameter changes; leave it off to rediscover orbits by grid search.
+          </div>
+        </>
+      )}
     </Collapsible>
   );
 };

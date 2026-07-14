@@ -1,7 +1,8 @@
 export const DEFAULT_PERIODIC_SEARCH_SETTINGS = {
   gridSize: 10,
   thetaGridSize: 10,
-  residualThreshold: 1e-10
+  residualThreshold: 1e-10,
+  useContinuation: false
 };
 
 export const PERIODIC_SEARCH_LIMITS = {
@@ -18,6 +19,7 @@ export const normalizePeriodicSearchSettings = (next, fallback = DEFAULT_PERIODI
   const parsedGrid = Number.parseInt(`${next?.gridSize ?? safeFallback.gridSize}`, 10);
   const parsedTheta = Number.parseInt(`${next?.thetaGridSize ?? safeFallback.thetaGridSize}`, 10);
   const parsedThreshold = Number(next?.residualThreshold ?? safeFallback.residualThreshold);
+  const useContinuation = Boolean(next?.useContinuation ?? safeFallback.useContinuation);
 
   const gridSize = Number.isFinite(parsedGrid)
     ? Math.min(PERIODIC_SEARCH_LIMITS.gridSizeMax, Math.max(PERIODIC_SEARCH_LIMITS.gridSizeMin, parsedGrid))
@@ -34,6 +36,7 @@ export const normalizePeriodicSearchSettings = (next, fallback = DEFAULT_PERIODI
   return {
     gridSize,
     thetaGridSize,
-    residualThreshold
+    residualThreshold,
+    useContinuation
   };
 };

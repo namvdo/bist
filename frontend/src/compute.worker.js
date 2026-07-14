@@ -4,6 +4,7 @@ const MIS_FILTER_POINTS_PER_BOX = 64;
 
 let wasmPromise = null;
 let cachedUlamComputer = null;
+let cachedPeriodicComputation = null;
 
 const ensureWasm = async () => {
   if (!wasmPromise) {
@@ -54,6 +55,51 @@ const filterOrbitsBySupport = (orbits, support) => {
   );
 };
 
+const sameNumber = (a, b) => Math.abs((a ?? 0) - (b ?? 0)) < 1e-12;
+
+const sameViewRange = (a, b) => (
+  sameNumber(a?.xMin, b?.xMin)
+  && sameNumber(a?.xMax, b?.xMax)
+  && sameNumber(a?.yMin, b?.yMin)
+  && sameNumber(a?.yMax, b?.yMax)
+);
+
+const samePeriodicSearchSettings = (a, b) => (
+  sameNumber(a?.gridSize, b?.gridSize)
+  && sameNumber(a?.thetaGridSize, b?.thetaGridSize)
+  && sameNumber(a?.residualThreshold, b?.residualThreshold)
+);
+
+const canContinueHenonPeriodic = (wasm, payload) => {
+  const previous = cachedPeriodicComputation;
+  return (
+    payload.dynamicSystem === 'henon'
+    && payload.periodicSearchSettings?.useContinuation === true
+    && previous?.dynamicSystem === 'henon'
+    && typeof wasm.continueBoundaryHenonOrbits === 'function'
+    && (previous.allOrbits || []).length > 0
+    && previous.params?.maxPeriod === payload.params?.maxPeriod
+    && sameViewRange(previous.viewRange, payload.viewRange)
+    && samePeriodicSearchSettings(previous.periodicSearchSettings, payload.periodicSearchSettings)
+  );
+};
+
+const describePeriodicContinuationSkip = (wasm, payload) => {
+  const previous = cachedPeriodicComputation;
+  if (payload.dynamicSystem !== 'henon') return 'system is not Hénon';
+  if (payload.periodicSearchSettings?.useContinuation !== true) return 'continuation is disabled';
+  if (!previous) return 'no previous Hénon orbit cache';
+  if (previous.dynamicSystem !== 'henon') return 'previous cache is not Hénon';
+  if (typeof wasm.continueBoundaryHenonOrbits !== 'function') return 'WASM continuation export is unavailable';
+  if ((previous.allOrbits || []).length === 0) return 'previous orbit cache is empty';
+  if (previous.params?.maxPeriod !== payload.params?.maxPeriod) return 'max period changed';
+  if (!sameViewRange(previous.viewRange, payload.viewRange)) return 'view range changed';
+  if (!samePeriodicSearchSettings(previous.periodicSearchSettings, payload.periodicSearchSettings)) {
+    return 'periodic search settings changed';
+  }
+  return null;
+};
+
 const computePeriodic = async (payload) => {
   const wasm = await ensureWasm();
   const { dynamicSystem, params, viewRange, periodicSearchSettings } = payload;
@@ -66,7 +112,38 @@ const computePeriodic = async (payload) => {
   let supportComputer = null;
 
   try {
-    if (dynamicSystem === 'duffing') {
+    let allOrbits = null;
+    let usedContinuation = false;
+
+    if (canContinueHenonPeriodic(wasm, payload)) {
+      try {
+        const previous = cachedPeriodicComputation;
+        const continued = wasm.continueBoundaryHenonOrbits(
+          previous.allOrbits,
+          previous.params.a,
+          previous.params.b,
+          previous.params.epsilon,
+          params.a,
+          params.b,
+          params.epsilon,
+          params.maxPeriod,
+          periodicSearchSettings.residualThreshold
+        );
+        if ((continued || []).length > 0) {
+          allOrbits = continued;
+          usedContinuation = true;
+          console.log(
+            `Periodic orbits: used continuation from a=${previous.params.a}, b=${previous.params.b}, ε=${previous.params.epsilon} to a=${params.a}, b=${params.b}, ε=${params.epsilon}`
+          );
+        }
+      } catch (err) {
+        console.warn('Periodic orbit continuation failed; falling back to full search.', err);
+      }
+    } else if (dynamicSystem === 'henon') {
+      console.log(`Periodic orbits: running full grid search (${describePeriodicContinuationSkip(wasm, payload)})`);
+    }
+
+    if (!allOrbits && dynamicSystem === 'duffing') {
       system = new wasm.DuffingSystemWasm(params.a, params.b, params.maxPeriod);
     } else if (dynamicSystem === 'duffing_ode') {
       system = new wasm.EulerMapSystemWasm(
@@ -75,7 +152,7 @@ const computePeriodic = async (payload) => {
         params.epsilon,
         params.maxPeriod
       );
-    } else {
+    } else if (!allOrbits) {
       system = new wasm.BoundaryHenonSystemWasm(
         params.a,
         params.b,
@@ -91,7 +168,11 @@ const computePeriodic = async (payload) => {
       );
     }
 
-    let orbits = system.getPeriodicOrbits();
+    if (!allOrbits) {
+      allOrbits = system.getPeriodicOrbits();
+    }
+
+    let orbits = allOrbits;
     let support = null;
 
     if (dynamicSystem === 'henon') {
@@ -120,7 +201,28 @@ const computePeriodic = async (payload) => {
       orbits = filterOrbitsBySupport(orbits, support);
     }
 
-    return { orbits, support };
+    if (dynamicSystem === 'henon') {
+      cachedPeriodicComputation = {
+        dynamicSystem,
+        params: {
+          a: params.a,
+          b: params.b,
+          epsilon: params.epsilon,
+          maxPeriod: params.maxPeriod
+        },
+        viewRange: { ...viewRange },
+        periodicSearchSettings: {
+          gridSize: periodicSearchSettings.gridSize,
+          thetaGridSize: periodicSearchSettings.thetaGridSize,
+          residualThreshold: periodicSearchSettings.residualThreshold
+        },
+        allOrbits
+      };
+    } else {
+      cachedPeriodicComputation = null;
+    }
+
+    return { orbits, support, usedContinuation };
   } finally {
     if (supportComputer && typeof supportComputer.free === 'function') {
       supportComputer.free();
@@ -360,6 +462,35 @@ const getUlamTransitions = async (payload) => {
   return cachedUlamComputer.get_transitions(payload.index) || [];
 };
 
+const computeHittingContours = async (payload) => {
+  const wasm = await ensureWasm();
+  const { params, viewRange, settings } = payload;
+
+  if (typeof wasm.computeHenonHittingLevelSets !== 'function') {
+    throw new Error('Hénon hitting-level contour export is unavailable');
+  }
+
+  return wasm.computeHenonHittingLevelSets(
+    params.a,
+    params.b,
+    params.epsilon,
+    viewRange.xMin,
+    viewRange.xMax,
+    viewRange.yMin,
+    viewRange.yMax,
+    settings.maxPeriod,
+    settings.ulamSubdivisions,
+    settings.ulamPointsPerBox,
+    settings.ulamIterations,
+    settings.supportMass,
+    settings.thetaGridSize,
+    settings.sampleGridSize,
+    settings.maxLevel,
+    settings.hitTolerance,
+    settings.residualThreshold
+  );
+};
+
 self.onmessage = async (event) => {
   const { id, kind, payload } = event.data || {};
   if (!kind) return;
@@ -372,6 +503,8 @@ self.onmessage = async (event) => {
       result = await computeManifolds(payload);
     } else if (kind === 'computeUlam') {
       result = await computeUlam(payload);
+    } else if (kind === 'computeHittingContours') {
+      result = await computeHittingContours(payload);
     } else if (kind === 'getUlamTransitions') {
       result = await getUlamTransitions(payload);
     } else {

@@ -12,6 +12,7 @@ vi.mock('../sidebar/VisualizationPanel', () => ({ VisualizationPanel: () => <div
 vi.mock('../sidebar/StartingPoint', () => ({ StartingPoint: () => <div data-testid="starting-point" /> }));
 vi.mock('../sidebar/PeriodicOrbitsPanel', () => ({ PeriodicOrbitsPanel: () => <div data-testid="periodic-orbits" /> }));
 vi.mock('../sidebar/PeriodicSearchPanel', () => ({ PeriodicSearchPanel: () => <div data-testid="periodic-search-panel" /> }));
+vi.mock('../sidebar/HittingContoursPanel', () => ({ HittingContoursPanel: () => <div data-testid="hitting-contours-panel" /> }));
 vi.mock('../sidebar/UlamPanel', () => ({ UlamPanel: () => <div data-testid="ulam-panel" /> }));
 vi.mock('../sidebar/AnimationPanel', () => ({ AnimationPanel: () => <div data-testid="animation-panel" /> }));
 vi.mock('../sidebar/ParameterSweepPanel', () => ({ ParameterSweepPanel: () => <div data-testid="sweep-panel" /> }));
@@ -53,6 +54,8 @@ const baseProps = {
   filters: {},
   setFilters: vi.fn(),
   periodicState: {},
+  hittingContourState: {},
+  setHittingContourState: vi.fn(),
   periodicSearchSettings: { gridSize: 10, thetaGridSize: 10, residualThreshold: 1e-10 },
   updatePeriodicSearchSettings: vi.fn(),
   updateStartPoint: vi.fn(),
@@ -93,6 +96,11 @@ describe('Sidebar', () => {
   it('shows periodic search section for discrete boundary systems', () => {
     render(<Sidebar {...baseProps} type="discrete" dynamicSystem="henon" />);
     expect(screen.getByTestId('periodic-search-panel')).toBeInTheDocument();
+  });
+
+  it('shows hitting-level controls for the Hénon boundary map', () => {
+    render(<Sidebar {...baseProps} type="discrete" dynamicSystem="henon" />);
+    expect(screen.getByTestId('hitting-contours-panel')).toBeInTheDocument();
   });
 
   it('passes recompute controls into the bottom controls bar', () => {
