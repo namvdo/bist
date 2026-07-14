@@ -1,7 +1,7 @@
 # Bounded Invariant Set Toolbox (BIST)
 
 <div align="center">
-  <img src="./frontend/public/bist-logo-full.png" alt="BIST - Bounded Invariant Set Tool logo" width="520" />
+  <img src="./frontend/public/bist-logo-full.png" alt="BIST - Bounded Invariant Set Toolbox logo" width="520" />
 </div>
 
 Iteractive web-based visualization tool for exploring set-valued dynamical systems with additive bounded noise, developed as part of the Advanced Computing Project (ACP2) research course at the University of Oulu.
