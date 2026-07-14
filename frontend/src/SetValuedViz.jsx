@@ -535,7 +535,7 @@ const SetValuedViz = () => {
         if (!camera) return;
 
         const gridHeight = range.yMax - range.yMin;
-        const padding = 0.5;
+        const padding = 0.12;
         const viewWidth = window.innerWidth - 268;
         const aspect = viewWidth / window.innerHeight;
         const frustumHeight = gridHeight + padding * 2;
