@@ -191,3 +191,64 @@ pub enum ValidationCode {
     PredecessorResidualTooLarge,
     StateOutsideBounds
 }
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct LevelDiagnostics {
+    pub nesting_residual: f64,
+    pub predecessor_residual: f64,
+    pub uncertainty: f64,
+    pub max_closure_error: f64,
+    pub max_segment_length: f64,
+    pub nested: bool,
+    pub boundar_valid: bool, 
+    pub issues: Vec<ValidationIssue>,
+}
+
+impl Default for LevelDiagnostics {
+    fn default() -> Self {
+        Self {
+            nesting_residual: 0.0,
+            predecessor_residual: 0.0,
+            uncertainty: 0.0,
+            max_closure_error: 0.0,
+            max_segment_length: 0.0,
+            nested: true,
+            boundar_valid: true,
+            issues: Vec::new()
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PredecessorLevel {
+    pub level: usize,
+    pub boundary_components: Vec<BoundaryComponent>,
+    pub erosion_components: Vec<BoundaryComponent>,
+    pub area: f64,
+    pub eroded_area: Option<f64>,
+    pub component_count: usize,
+    pub hole_count: usize,
+    pub diagnostics: LevelDiagnostics,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PredecessorStopReason {
+    RequestedLevelsCompleted,
+    FixedPointReached,
+    EmptyErosion,
+    TopologyChanged,
+    ValidationFailed,
+    RefinementLimit,
+    PointLimit,
+    EscapedDomain,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PredecessorResult {
+    pub levels: Vec<PredecessorLevel>,
+    pub completed_levels: usize,
+    pub stop_reason: PredecessorStopReason,
+    pub config: PredecessorConfig,
+    pub bounds: Bounds2D
+}
