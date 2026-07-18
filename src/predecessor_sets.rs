@@ -324,3 +324,70 @@ impl SignedDistanceGrid {
         self.signed_distance.get(index).copied()
     }
 }
+
+
+#[cfg(test)]
+mod tests {
+    use crate::Orientation::{Clockwise, CounterClockwise};
+
+use super::*;
+
+    #[test]
+    fn extended_boundary_point_normalizes_normal() {
+        let point = ExtendedBoundaryPoint::new(1.0, 2.0, 3.0, 4.0)
+            .expect("valid extended boundary point");
+        assert!((point.normal_norm() - 1.0).abs() < 1e-12);
+        assert!((point.nx - 0.6).abs() < 1e-12);
+        assert!((point.ny - 0.8).abs() < 1e-12);
+    }
+
+    #[test]
+    fn extended_boundary_point_rejects_zero_normal() {
+        let point = ExtendedBoundaryPoint::new(1.0, 2.0, 0.0, 0.0);
+        assert!(point.is_err());
+
+    }
+
+
+    #[test]
+    fn signed_distance_grid_checks_dimensions_and_indexing() {
+        let bounds = Bounds2D {
+            x_min: -2.0,
+            x_max: 2.0,
+            y_min: -1.0,
+            y_max: 1.0,
+        }
+
+        let grid = SignedDistanceGrid::new(bounds, 5, 3)
+            .expect("valid signed-distance grid");
+
+        assert_eq!(grid.signed_distance.len(), 15);
+        assert_eq!(grid.cell_states.len(), 15);
+        assert_eq!(grid.index(0, 0), Some(0));
+        assert_eq!(grid.index(2, 4), Some(14));
+        assert_eq!(grid.index(3, 0), None);
+        assert_eq!(grid.point(1, 2), Some((0.0, 0.0)));
+
+    }
+
+    #[test]
+    fn orientation_follows_signed_area () {
+        assert_eq!(Orientation::from_signed_area(1.0), CounterClockwise);
+        assert_eq!(Orientation::from_signed_area(-1.0), Clockwise);
+    }
+
+    #[test]
+    fn default_config_has_finite_positive_tolerances() {
+        let config = PredecessorConfig::default();
+
+        assert!(config.num_levels > 0);
+        assert!(config.grid_width >= 2);
+        assert!(config.grid_height >= 2);
+        assert!(config.max_segment_length.is_finite());
+        assert!(config.max_segment_length > 0.0);
+        assert!(config.curve_tolerance.is_finite());
+        assert!(config.curve_tolerance > 0.0);
+        assert!(config.closure_tolerance.is_finite());
+        assert!(config.closure_tolerance > 0.0);
+    }
+}
