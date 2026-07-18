@@ -252,3 +252,75 @@ pub struct PredecessorResult {
     pub config: PredecessorConfig,
     pub bounds: Bounds2D
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GridCellState {
+    Inside,
+    Outside,
+    BoundaryUncertain,
+}
+
+/// signed_distance < 0 inside the set;
+/// signed_distance = 0 on the boundary;
+/// signed_distance > 0 outside the set;
+#[derive(Debug, Clone)]
+pub (crate) struct SignedDistanceGrid {
+    pub bounds: Bounds2D,
+    pub width: usize,
+    pub height: usize,
+    pub dx: f64,
+    pub dy: f64,
+    pub signed_distance: Vec<f64>,
+    pub cell_states: Vec<GridCellState>
+}
+
+
+impl SignedDistanceGrid {
+    pub fn new(bounds: Bounds2D, width: usize, height: usize) -> Result<Self, String> {
+        if !bounds.is_valid() {
+            return Err("Signed-distance grid bounds are invalid".to_string());
+        }
+
+        if bounds.width() < 2 || bounds.height() < 2 {
+            return Err("Signed-distance grid dimensions must each at least two".to_string());
+        }
+
+        let cell_count = width
+            .checked_mul(height)
+            .ok_or_else(|| "Signed-distance grid size overflowed usize".to_string())?;
+
+        let dx = bounds.width() / (width - 1) as f64;
+        let dy = bounds.height() / (height - 1) as f64;
+
+        Ok(Self {
+            bounds,
+            width,
+            height,
+            dx,
+            dy,
+            signed_distance: vec![f64::INFINITY, cell_count],
+            cell_states: vec![GridCellState::BoundaryUncertain, cell_count]
+        })
+    }
+
+    pub fn index(&self, row: usize, column: usize) -> Option<usize> {
+        if row >= self.height || column >= self.width {
+            return None;
+        }
+        row.checked_mul(self.width)?.checked_add(column)
+    }
+
+    pub fn point(&self, row: usize, column: usize) -> Option<(f64, f64)> {
+        self.index(row, column)?;
+
+        Some((
+            self.bounds.x_min + column as f64 * self.dx,
+            self.bounds.y_min + row as f64 * self.dy
+        ))
+
+    }
+    pub fn value(&self, row: usize, column: usize) -> Option<f64> {
+        let index = self.index(row, column) ?;
+        self.signed_distance.get(index).copied()
+    }
+}
