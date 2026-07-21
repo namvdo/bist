@@ -32,3 +32,9 @@ pub use dynamical_systems::*;
 
 mod continuous_ds;
 pub use continuous_ds::*;
+
+mod geometric_offsets;
+pub use geometric_offsets::*;
+
+mod basin_approximator;
+pub use basin_approximator::*;

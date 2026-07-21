@@ -97,7 +97,7 @@ pub trait DynamicalSystem: Send + Sync {
             }
 
             let new_pos = self.map_inverse(unprojected_pos)?;
-            let new_normal = self.transform_normal_inverse(unprojected_pos, current.normal)?;
+            let new_normal = self.transform_normal_inverse(new_pos, current.normal)?;
 
             if !new_pos.x.is_finite()
                 || !new_pos.y.is_finite()
@@ -240,6 +240,20 @@ impl DynamicalSystem for UserDefinedDynamicalSystem {
 mod tests {
     use super::*;
     use crate::parameters::ParameterEntry;
+
+    #[test]
+    fn henon_extended_inverse_roundtrip_uses_inverse_state_jacobian() {
+        let system = HenonSystem::new(0.4, 0.3, 0.0625);
+        let normal = Vector2::new(0.6, 0.8);
+        let state = ExtendedState {
+            pos: Vector2::new(0.7, -0.2),
+            normal,
+        };
+        let image = system.extended_map(state, 1).unwrap();
+        let recovered = system.extended_map_inverse(image, 1).unwrap();
+        assert!((recovered.pos - state.pos).norm() < 1e-12);
+        assert!((recovered.normal - state.normal).norm() < 1e-12);
+    }
 
     #[test]
     fn test_user_defined_system_basic() {

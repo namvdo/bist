@@ -782,7 +782,32 @@ impl<S: DynamicalSystem> UnstableManifoldComputer<S> {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TrajectoryRet {
     pub points: Vec<(f64, f64)>,
+    pub extended_points: Vec<(f64, f64, f64, f64)>,
     pub stop_reason: String,
+}
+
+fn trajectory_ret(traj: &Trajectory) -> TrajectoryRet {
+    let finite = |state: &&ExtendedState| {
+        state.pos.x.is_finite()
+            && state.pos.y.is_finite()
+            && state.normal.x.is_finite()
+            && state.normal.y.is_finite()
+    };
+    TrajectoryRet {
+        points: traj
+            .points
+            .iter()
+            .filter(finite)
+            .map(|state| (state.pos.x, state.pos.y))
+            .collect(),
+        extended_points: traj
+            .points
+            .iter()
+            .filter(finite)
+            .map(|state| (state.pos.x, state.pos.y, state.normal.x, state.normal.y))
+            .collect(),
+        stop_reason: format!("{:?}", traj.stop_reason),
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1085,29 +1110,9 @@ pub fn compute_manifold_simple(
                 traj_minus.stop_reason
             );
 
-            let plus_points: Vec<(f64, f64)> = traj_plus
-                .points
-                .iter()
-                .filter(|s| s.pos.x.is_finite() && s.pos.y.is_finite())
-                .map(|s| (s.pos.x, s.pos.y))
-                .collect();
-
-            let minus_points: Vec<(f64, f64)> = traj_minus
-                .points
-                .iter()
-                .filter(|s| s.pos.x.is_finite() && s.pos.y.is_finite())
-                .map(|s| (s.pos.x, s.pos.y))
-                .collect();
-
             manifolds_result.push(ManifoldResult {
-                plus: TrajectoryRet {
-                    points: plus_points,
-                    stop_reason: format!("{:?}", traj_plus.stop_reason),
-                },
-                minus: TrajectoryRet {
-                    points: minus_points,
-                    stop_reason: format!("{:?}", traj_minus.stop_reason),
-                },
+                plus: trajectory_ret(&traj_plus),
+                minus: trajectory_ret(&traj_minus),
                 saddle_point: (pos.x, pos.y),
                 eigenvalue: saddle_pt.eigenvalue,
             });
@@ -1230,21 +1235,9 @@ pub fn compute_manifold_js(
         traj_minus.points.len()
     );
 
-    let convert_traj = |traj: &Trajectory| -> TrajectoryRet {
-        TrajectoryRet {
-            points: traj
-                .points
-                .iter()
-                .filter(|s| s.pos.x.is_finite() && s.pos.y.is_finite())
-                .map(|s| (s.pos.x, s.pos.y))
-                .collect(),
-            stop_reason: format!("{:?}", traj.stop_reason),
-        }
-    };
-
     let result = serde_json::json!({
-        "plus": convert_traj(&traj_plus),
-        "minus": convert_traj(&traj_minus),
+        "plus": trajectory_ret(&traj_plus),
+        "minus": trajectory_ret(&traj_minus),
     });
 
     let serializer = serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
@@ -1441,23 +1434,9 @@ pub fn compute_user_defined_manifold(
             let targets = vec![];
 
             if let Ok((traj_plus, traj_minus)) = computer.compute_manifold(&saddle, &targets) {
-                let convert_points = |traj: &Trajectory| {
-                    traj.points
-                        .iter()
-                        .filter(|p| p.pos.x.is_finite() && p.pos.y.is_finite())
-                        .map(|p| (p.pos.x, p.pos.y))
-                        .collect::<Vec<_>>()
-                };
-
                 manifolds_result.push(ManifoldResult {
-                    plus: TrajectoryRet {
-                        points: convert_points(&traj_plus),
-                        stop_reason: format!("{:?}", traj_plus.stop_reason),
-                    },
-                    minus: TrajectoryRet {
-                        points: convert_points(&traj_minus),
-                        stop_reason: format!("{:?}", traj_minus.stop_reason),
-                    },
+                    plus: trajectory_ret(&traj_plus),
+                    minus: trajectory_ret(&traj_minus),
                     saddle_point: (fp_pos.x, fp_pos.y),
                     eigenvalue: unstable_lambda,
                 });
@@ -1815,14 +1794,8 @@ pub fn compute_manifold_from_orbits(
                 );
 
                 manifolds_result.push(ManifoldResult {
-                    plus: TrajectoryRet {
-                        points: plus_points,
-                        stop_reason: format!("{:?}", traj_plus.stop_reason),
-                    },
-                    minus: TrajectoryRet {
-                        points: minus_points,
-                        stop_reason: format!("{:?}", traj_minus.stop_reason),
-                    },
+                    plus: trajectory_ret(&traj_plus),
+                    minus: trajectory_ret(&traj_minus),
                     saddle_point: (px, py),
                     eigenvalue: unstable_lambda,
                 });
@@ -2169,14 +2142,8 @@ pub fn compute_stable_and_unstable_manifolds(
                 );
 
                 Some(ManifoldResult {
-                    plus: TrajectoryRet {
-                        points: plus_points,
-                        stop_reason: format!("{:?}", traj_plus.stop_reason),
-                    },
-                    minus: TrajectoryRet {
-                        points: minus_points,
-                        stop_reason: format!("{:?}", traj_minus.stop_reason),
-                    },
+                    plus: trajectory_ret(&traj_plus),
+                    minus: trajectory_ret(&traj_minus),
                     saddle_point: (px, py),
                     eigenvalue: unstable_lambda,
                 })
@@ -2229,14 +2196,8 @@ pub fn compute_stable_and_unstable_manifolds(
                 );
 
                 Some(ManifoldResult {
-                    plus: TrajectoryRet {
-                        points: plus_points,
-                        stop_reason: format!("{:?}", traj_plus.stop_reason),
-                    },
-                    minus: TrajectoryRet {
-                        points: minus_points,
-                        stop_reason: format!("{:?}", traj_minus.stop_reason),
-                    },
+                    plus: trajectory_ret(&traj_plus),
+                    minus: trajectory_ret(&traj_minus),
                     saddle_point: (px, py),
                     eigenvalue: stable_lambda,
                 })
@@ -2545,23 +2506,9 @@ pub fn compute_manifold_from_orbits_user_defined(
 
             if let Ok((traj_plus, traj_minus)) = computer.compute_manifold(&saddle_pt, &all_points)
             {
-                let convert = |traj: &Trajectory| -> Vec<(f64, f64)> {
-                    traj.points
-                        .iter()
-                        .filter(|s| s.pos.x.is_finite() && s.pos.y.is_finite())
-                        .map(|s| (s.pos.x, s.pos.y))
-                        .collect()
-                };
-
                 manifolds_result.push(ManifoldResult {
-                    plus: TrajectoryRet {
-                        points: convert(&traj_plus),
-                        stop_reason: format!("{:?}", traj_plus.stop_reason),
-                    },
-                    minus: TrajectoryRet {
-                        points: convert(&traj_minus),
-                        stop_reason: format!("{:?}", traj_minus.stop_reason),
-                    },
+                    plus: trajectory_ret(&traj_plus),
+                    minus: trajectory_ret(&traj_minus),
                     saddle_point: (px, py),
                     eigenvalue: unstable_lambda,
                 });
@@ -2754,24 +2701,10 @@ pub fn compute_stable_and_unstable_manifolds_user_defined(
             let saddle_stable =
                 make_saddle(stable_eigenvec, stable_lambda, SaddleType::DualRepeller);
 
-            let convert = |traj: &Trajectory| -> Vec<(f64, f64)> {
-                traj.points
-                    .iter()
-                    .filter(|s| s.pos.x.is_finite() && s.pos.y.is_finite())
-                    .map(|s| (s.pos.x, s.pos.y))
-                    .collect()
-            };
-
             if let Ok((tp, tm)) = computer.compute_manifold(&saddle_unstable, &all_points) {
                 unstable_manifolds.push(ManifoldResult {
-                    plus: TrajectoryRet {
-                        points: convert(&tp),
-                        stop_reason: format!("{:?}", tp.stop_reason),
-                    },
-                    minus: TrajectoryRet {
-                        points: convert(&tm),
-                        stop_reason: format!("{:?}", tm.stop_reason),
-                    },
+                    plus: trajectory_ret(&tp),
+                    minus: trajectory_ret(&tm),
                     saddle_point: (px, py),
                     eigenvalue: unstable_lambda,
                 });
@@ -2779,14 +2712,8 @@ pub fn compute_stable_and_unstable_manifolds_user_defined(
 
             if let Ok((tp, tm)) = computer.compute_manifold(&saddle_stable, &all_points) {
                 stable_manifolds.push(ManifoldResult {
-                    plus: TrajectoryRet {
-                        points: convert(&tp),
-                        stop_reason: format!("{:?}", tp.stop_reason),
-                    },
-                    minus: TrajectoryRet {
-                        points: convert(&tm),
-                        stop_reason: format!("{:?}", tm.stop_reason),
-                    },
+                    plus: trajectory_ret(&tp),
+                    minus: trajectory_ret(&tm),
                     saddle_point: (px, py),
                     eigenvalue: stable_lambda,
                 });
