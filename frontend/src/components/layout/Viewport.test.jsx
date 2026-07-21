@@ -1,6 +1,6 @@
 import React from 'react';
 import { render, screen } from '@testing-library/react';
-import { vi } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { Viewport } from './Viewport';
 
 const baseProps = {
@@ -12,8 +12,9 @@ const baseProps = {
     showStableManifold: false,
     showOrbits: false
   },
+  geometricOffsetState: { showContours: false },
+  basinState: { showBasin: false },
   ulamState: { showUlamOverlay: false },
-  hittingContourState: { showOverlay: false },
   handleZoomIn: vi.fn(),
   handleZoomOut: vi.fn(),
   handleResetView: vi.fn(),

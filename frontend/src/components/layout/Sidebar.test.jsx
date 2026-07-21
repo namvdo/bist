@@ -1,6 +1,6 @@
 import React from 'react';
 import { render, screen } from '@testing-library/react';
-import { vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const controlsBarMock = vi.fn();
 
@@ -8,11 +8,12 @@ vi.mock('../sidebar/SystemPicker', () => ({ SystemPicker: () => <div data-testid
 vi.mock('../sidebar/EquationDisplay', () => ({ EquationDisplay: () => <div data-testid="equation-display" /> }));
 vi.mock('../sidebar/ParametersPanel', () => ({ ParametersPanel: () => <div data-testid="parameters-panel" /> }));
 vi.mock('../sidebar/ManifoldsPanel', () => ({ ManifoldsPanel: () => <div data-testid="manifolds-panel" /> }));
+vi.mock('../sidebar/GeometricOffsetsPanel', () => ({ GeometricOffsetsPanel: () => <div data-testid="geometric-offsets-panel" /> }));
+vi.mock('../sidebar/BasinApproximationPanel', () => ({ BasinApproximationPanel: () => <div data-testid="basin-panel" /> }));
 vi.mock('../sidebar/VisualizationPanel', () => ({ VisualizationPanel: () => <div data-testid="visualization-panel" /> }));
 vi.mock('../sidebar/StartingPoint', () => ({ StartingPoint: () => <div data-testid="starting-point" /> }));
 vi.mock('../sidebar/PeriodicOrbitsPanel', () => ({ PeriodicOrbitsPanel: () => <div data-testid="periodic-orbits" /> }));
 vi.mock('../sidebar/PeriodicSearchPanel', () => ({ PeriodicSearchPanel: () => <div data-testid="periodic-search-panel" /> }));
-vi.mock('../sidebar/HittingContoursPanel', () => ({ HittingContoursPanel: () => <div data-testid="hitting-contours-panel" /> }));
 vi.mock('../sidebar/UlamPanel', () => ({ UlamPanel: () => <div data-testid="ulam-panel" /> }));
 vi.mock('../sidebar/AnimationPanel', () => ({ AnimationPanel: () => <div data-testid="animation-panel" /> }));
 vi.mock('../sidebar/ParameterSweepPanel', () => ({ ParameterSweepPanel: () => <div data-testid="sweep-panel" /> }));
@@ -50,12 +51,19 @@ const baseProps = {
   resetViewRange: vi.fn(),
   manifoldState: {},
   setManifoldState: vi.fn(),
+  geometricOffsetState: {},
+  setGeometricOffsetState: vi.fn(),
+  canComputeGeometricOffsets: false,
+  computeGeometricOffsets: vi.fn(),
+  basinState: {},
+  setBasinState: vi.fn(),
+  canComputeBasin: false,
+  basinTargetPointCount: 0,
+  computeBasin: vi.fn(),
   ORBIT_COLORS: {},
   filters: {},
   setFilters: vi.fn(),
   periodicState: {},
-  hittingContourState: {},
-  setHittingContourState: vi.fn(),
   periodicSearchSettings: { gridSize: 10, thetaGridSize: 10, residualThreshold: 1e-10 },
   updatePeriodicSearchSettings: vi.fn(),
   updateStartPoint: vi.fn(),
@@ -98,9 +106,20 @@ describe('Sidebar', () => {
     expect(screen.getByTestId('periodic-search-panel')).toBeInTheDocument();
   });
 
-  it('shows hitting-level controls for the Hénon boundary map', () => {
-    render(<Sidebar {...baseProps} type="discrete" dynamicSystem="henon" />);
-    expect(screen.getByTestId('hitting-contours-panel')).toBeInTheDocument();
+  it('shows geometric offset controls only for the Hénon boundary map', () => {
+    const { rerender } = render(<Sidebar {...baseProps} type="discrete" dynamicSystem="henon" />);
+    expect(screen.getByTestId('geometric-offsets-panel')).toBeInTheDocument();
+
+    rerender(<Sidebar {...baseProps} type="discrete" dynamicSystem="standard" />);
+    expect(screen.queryByTestId('geometric-offsets-panel')).toBeNull();
+  });
+
+  it('shows deterministic basin controls only for the Hénon boundary map', () => {
+    const { rerender } = render(<Sidebar {...baseProps} type="discrete" dynamicSystem="henon" />);
+    expect(screen.getByTestId('basin-panel')).toBeInTheDocument();
+
+    rerender(<Sidebar {...baseProps} type="discrete" dynamicSystem="standard" />);
+    expect(screen.queryByTestId('basin-panel')).toBeNull();
   });
 
   it('passes recompute controls into the bottom controls bar', () => {

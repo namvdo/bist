@@ -14,14 +14,10 @@ import {
     appendTrajectoryHistoryPoint,
     shouldRecordTrajectoryHistoryPoint
 } from './utils/trajectoryState';
-import {
-    DEFAULT_HITTING_CONTOUR_STATE,
-    getHittingTargetContours,
-    getStabilityColorHex,
-    getVisibleHittingCells,
-    normalizeHittingContourSettings,
-    normalizeHittingContourState
-} from './utils/hittingContours';
+import { buildGeometricOffsetSeed } from './utils/geometricOffsetSeed';
+import { buildBasinTarget } from './utils/basinTarget';
+import { BASIN_COMPUTE_DEFAULTS, BASIN_LAYER_STYLES } from './utils/basinDisplay';
+import { describeBasinComputationError } from './utils/basinError';
 
 const GRID_STYLE = {
     gridDivisions: 16,
@@ -33,37 +29,6 @@ const EMPTY_ARRAY = [];
 const DEFAULT_VALIDATION = { normalized: EMPTY_ARRAY, errors: EMPTY_ARRAY, valid: true };
 const PARAM_ABS_LIMIT = 10;
 
-const buildCircleRingPoints = (centerX, centerY, radius, segments = 128) => {
-    const points = [];
-    for (let i = 0; i <= segments; i++) {
-        const t = (i / segments) * Math.PI * 2;
-        points.push(new THREE.Vector3(
-            centerX + Math.cos(t) * radius,
-            centerY + Math.sin(t) * radius,
-            0.34
-        ));
-    }
-    return points;
-};
-
-const buildAbstractGrid = (viewRange, divisions = 12) => {
-    const points = [];
-    const width = viewRange.xMax - viewRange.xMin;
-    const height = viewRange.yMax - viewRange.yMin;
-    if (width <= 0 || height <= 0) return points;
-
-    for (let i = 0; i <= divisions; i++) {
-        const tx = i / divisions;
-        const x = viewRange.xMin + tx * width;
-        const y = viewRange.yMin + tx * height;
-        points.push(new THREE.Vector3(x, viewRange.yMin, 0.285));
-        points.push(new THREE.Vector3(x, viewRange.yMax, 0.285));
-        points.push(new THREE.Vector3(viewRange.xMin, y, 0.285));
-        points.push(new THREE.Vector3(viewRange.xMax, y, 0.285));
-    }
-
-    return points;
-};
 const INITIAL_CUSTOM_EQUATIONS = {
     custom: {
         xEq: '1 - a * x^2 + y',
@@ -302,12 +267,12 @@ const SetValuedViz = () => {
         showOrbits: false,
         computeMethod: null
     });
-    const [hittingContourState, setHittingContourState] = useState(DEFAULT_HITTING_CONTOUR_STATE);
     const [periodicSearchSettings, setPeriodicSearchSettings] = useState(DEFAULT_PERIODIC_SEARCH_SETTINGS);
     const [draftPeriodicSearchSettings, setDraftPeriodicSearchSettings] = useState(DEFAULT_PERIODIC_SEARCH_SETTINGS);
 
     const [manifoldState, setManifoldState] = useState({
         manifolds: [],
+        rawManifolds: [],
         stableManifolds: [],
         fixedPoints: [],
         intersections: [],
@@ -317,8 +282,6 @@ const SetValuedViz = () => {
         showOrbitLines: false,
         showUnstableManifold: false,
         showStableManifold: false,
-        showNormalFan: false,
-        normalFanCount: 8,
         intersectionThreshold: 0.05,
         highlightedOrbitId: null,
         currentPoint: { x: 0.1, y: 0.1, nx: 1.0, ny: 0.0 }, // 4D point for boundary map
@@ -329,6 +292,41 @@ const SetValuedViz = () => {
         showTrail: true,
         startPoint: { x: 0.1, y: 0.1, nx: 1.0, ny: 0.0 }
     });
+
+    const [geometricOffsetState, setGeometricOffsetState] = useState({
+        numLevels: 5,
+        resolution: 256,
+        showContours: true,
+        isComputing: false,
+        result: null,
+        error: null
+    });
+
+    const [basinState, setBasinState] = useState({
+        maxLevels: 20,
+        showBasin: true,
+        isComputing: false,
+        result: null,
+        error: null
+    });
+
+    const geometricOffsetSeed = useMemo(
+        () => buildGeometricOffsetSeed(
+            manifoldState.rawManifolds?.length > 0 ? manifoldState.rawManifolds : manifoldState.manifolds,
+            4000,
+            { a: params.a, b: params.b, epsilon: params.epsilon }
+        ),
+        [manifoldState.rawManifolds, manifoldState.manifolds, params.a, params.b, params.epsilon]
+    );
+
+    const basinTarget = useMemo(
+        () => buildBasinTarget(
+            manifoldState.rawManifolds?.length > 0 ? manifoldState.rawManifolds : manifoldState.manifolds,
+            2000,
+            { a: params.a, b: params.b, epsilon: params.epsilon }
+        ),
+        [manifoldState.rawManifolds, manifoldState.manifolds, params.a, params.b, params.epsilon]
+    );
 
     const [filters, setFilters] = useState({
         period1: true, period2: true, period3: true,
@@ -452,8 +450,6 @@ const SetValuedViz = () => {
     const computeWorkerRequestIdRef = useRef(0);
     const computeWorkerPendingRef = useRef(new Map());
     const ulamDebounceRef = useRef(null);
-    const hittingContourDebounceRef = useRef(null);
-    const hittingContourRequestRef = useRef(0);
     const ulamSupportRef = useRef(null);
     const ulamTransitionsRequestRef = useRef(0);
 
@@ -796,6 +792,7 @@ const SetValuedViz = () => {
             iteration: 0,
             trajectoryPoints: [],
             manifolds: [],
+            rawManifolds: [],
             stableManifolds: [],
             fixedPoints: [],
             intersections: [],
@@ -918,31 +915,6 @@ const SetValuedViz = () => {
 
         raycasterRef.current.setFromCamera(mouseRef.current, cameraRef.current);
 
-        if (hittingContourState.showOverlay && hittingContourState.result) {
-            const levelMesh = sceneRef.current.getObjectByName('hitting-level-cells');
-            if (levelMesh) {
-                const intersects = raycasterRef.current.intersectObject(levelMesh);
-                if (intersects.length > 0 && intersects[0].instanceId !== undefined) {
-                    const entry = levelMesh.userData.entries?.[intersects[0].instanceId];
-                    if (entry) {
-                        setTooltip({
-                            visible: true,
-                            x: event.clientX,
-                            y: event.clientY,
-                            data: {
-                                type: 'Hitting Level',
-                                cell: entry.cell,
-                                hit: entry.hit,
-                                hitCount: entry.cell.hits?.length || 0,
-                                radius: hittingContourState.result.settings?.hitRadius
-                            }
-                        });
-                        return;
-                    }
-                }
-            }
-        }
-
         if (ulamState.showUlamOverlay && ulamState.gridBoxes.length > 0) {
             const ulamMesh = sceneRef.current.getObjectByName('ulam-grid');
             if (ulamMesh) {
@@ -987,9 +959,6 @@ const SetValuedViz = () => {
             if (obj.isMesh && (
                 obj.userData.type === 'orbit'
                 || obj.userData.type === 'fixedPoint'
-                || obj.userData.type === 'hittingTarget'
-                || obj.userData.type === 'hittingContourRing'
-                || obj.userData.type === 'hittingLevelPoint'
             )) {
                 meshes.push(obj);
             }
@@ -1000,54 +969,6 @@ const SetValuedViz = () => {
         if (intersects.length > 0) {
             const hit = intersects[0].object;
             const data = hit.userData;
-            if (data.type === 'hittingTarget') {
-                setTooltip({
-                    visible: true,
-                    x: event.clientX,
-                    y: event.clientY,
-                    data: {
-                        type: 'Hitting Target',
-                        target: data.target,
-                        topographic: data.topographic
-                    }
-                });
-                return;
-            }
-
-            if (data.type === 'hittingContourRing') {
-                setTooltip({
-                    visible: true,
-                    x: event.clientX,
-                    y: event.clientY,
-                    data: {
-                        type: 'Hitting Contour Ring',
-                        target: data.target,
-                        level: data.level,
-                        count: data.count,
-                        points: data.points || []
-                    }
-                });
-                return;
-            }
-
-            if (data.type === 'hittingLevelPoint') {
-                const point = data.points?.[intersects[0].instanceId];
-                if (point) {
-                    setTooltip({
-                        visible: true,
-                        x: event.clientX,
-                        y: event.clientY,
-                        data: {
-                            type: 'Hitting Level Point',
-                            target: data.target,
-                            level: data.level,
-                            point
-                        }
-                    });
-                    return;
-                }
-            }
-
             const jac = computeJacobian(data.pos.x, data.pos.y);
 
             if (data.type === 'orbit' && data.orbitId && manifoldState.showOrbitLines) {
@@ -1078,7 +999,7 @@ const SetValuedViz = () => {
                     : prev);
             }
         }
-    }, [computeJacobian, hittingContourState.showOverlay, hittingContourState.result, ulamState.showUlamOverlay, ulamState.gridBoxes, ulamState.invariantMeasure, ulamState.currentBoxIndex, ulamState.selectedBoxIndex, ulamState.transitions, manifoldState.showOrbitLines, manifoldState.highlightedOrbitId]);
+    }, [computeJacobian, ulamState.showUlamOverlay, ulamState.gridBoxes, ulamState.invariantMeasure, ulamState.currentBoxIndex, ulamState.selectedBoxIndex, ulamState.transitions, manifoldState.showOrbitLines, manifoldState.highlightedOrbitId]);
 
     const requestUlamTransitions = useCallback((index, mode = 'selected') => {
         if (index < 0) return;
@@ -1218,7 +1139,7 @@ const SetValuedViz = () => {
         }
         let cancelled = false;
 
-        setManifoldState(prev => ({ ...prev, isComputing: true }));
+        setManifoldState(prev => ({ ...prev, isComputing: true, rawManifolds: [] }));
 
         manifoldDebounceRef.current = setTimeout(() => {
             if (!wasmModule) return;
@@ -1240,6 +1161,7 @@ const SetValuedViz = () => {
                 setManifoldState(prev => ({
                     ...prev,
                     manifolds: [],
+                    rawManifolds: [],
                     stableManifolds: [],
                     fixedPoints: fixedPoints,
                     intersections: [],
@@ -1254,6 +1176,7 @@ const SetValuedViz = () => {
                     isComputing: false,
                     isReady: true,
                     manifolds: [],
+                    rawManifolds: [],
                     stableManifolds: [],
                     fixedPoints: [],
                     intersections: []
@@ -1277,6 +1200,7 @@ const SetValuedViz = () => {
                 setManifoldState(prev => ({
                     ...prev,
                     manifolds: [],
+                    rawManifolds: [],
                     stableManifolds: [],
                     fixedPoints: [],
                     isComputing: false,
@@ -1301,6 +1225,7 @@ const SetValuedViz = () => {
                     setManifoldState(prev => ({
                         ...prev,
                         manifolds: [],
+                        rawManifolds: [],
                         stableManifolds: [],
                         fixedPoints: [],
                         isComputing: false,
@@ -1337,6 +1262,7 @@ const SetValuedViz = () => {
                 setManifoldState(prev => ({
                     ...prev,
                     manifolds: clipManifoldsBySupport(result?.manifolds || [], support),
+                    rawManifolds: result?.manifolds || [],
                     stableManifolds: clipManifoldsBySupport(result?.stableManifolds || [], support),
                     fixedPoints: result?.fixedPoints || [],
                     intersections: result?.intersections || [],
@@ -1656,13 +1582,92 @@ const SetValuedViz = () => {
         }
     }, [recordingState.recordingEnabled]);
 
+    const computeGeometricOffsets = useCallback(async () => {
+        if (dynamicSystem !== 'henon' || geometricOffsetSeed.length < 3) {
+            setGeometricOffsetState(prev => ({ ...prev, error: 'A nondegenerate unstable-manifold boundary is required.' }));
+            return;
+        }
+        setGeometricOffsetState(prev => ({ ...prev, isComputing: true, error: null }));
+        try {
+            const result = await runComputeTask('computeGeometricOffsets', {
+                boundary: geometricOffsetSeed,
+                params: { epsilon: params.epsilon },
+                settings: { numLevels: geometricOffsetState.numLevels, resolution: geometricOffsetState.resolution },
+                viewRange
+            });
+            setGeometricOffsetState(prev => ({ ...prev, isComputing: false, result, error: null }));
+        } catch (error) {
+            setGeometricOffsetState(prev => ({
+                ...prev,
+                isComputing: false,
+                result: null,
+                error: error instanceof Error ? error.message : String(error)
+            }));
+        }
+    }, [dynamicSystem, geometricOffsetSeed, params.epsilon, geometricOffsetState.numLevels, geometricOffsetState.resolution, runComputeTask, viewRange]);
+
+    const computeBasin = useCallback(async () => {
+        if (dynamicSystem !== 'henon' || basinTarget.length < 3) {
+            setBasinState(previous => ({
+                ...previous,
+                error: 'A closed lifted MIS boundary with valid normals is required.'
+            }));
+            return;
+        }
+        setBasinState(previous => ({ ...previous, isComputing: true, error: null }));
+        try {
+            const result = await runComputeTask('computeExtendedBasin', {
+                targetPoints: basinTarget,
+                config: {
+                    a: params.a,
+                    b: params.b,
+                    epsilon: params.epsilon,
+                    bounds: {
+                        x_min: viewRange.xMin,
+                        x_max: viewRange.xMax,
+                        y_min: viewRange.yMin,
+                        y_max: viewRange.yMax
+                    },
+                    grid_x: BASIN_COMPUTE_DEFAULTS.gridXY,
+                    grid_y: BASIN_COMPUTE_DEFAULTS.gridXY,
+                    grid_theta: BASIN_COMPUTE_DEFAULTS.gridTheta,
+                    target_position_radius: BASIN_COMPUTE_DEFAULTS.targetPositionRadius,
+                    target_angle_radius: BASIN_COMPUTE_DEFAULTS.targetAngleRadius,
+                    max_levels: basinState.maxLevels
+                }
+            });
+            setBasinState(previous => ({ ...previous, isComputing: false, result, error: null }));
+        } catch (error) {
+            setBasinState(previous => ({
+                ...previous,
+                isComputing: false,
+                result: null,
+                error: describeBasinComputationError(error)
+            }));
+        }
+    }, [
+        basinState.maxLevels,
+        basinTarget,
+        dynamicSystem,
+        params.a,
+        params.b,
+        params.epsilon,
+        runComputeTask,
+        viewRange
+    ]);
+
+    useEffect(() => {
+        setGeometricOffsetState(prev => ({ ...prev, result: null, error: null }));
+        setBasinState(prev => ({ ...prev, result: null, error: null }));
+    }, [params.a, params.b, params.epsilon, manifoldState.manifolds, viewRange]);
+
     useEffect(() => {
         if (!sceneRef.current) return;
         const scene = sceneRef.current;
 
         const toRemove = [];
         scene.traverse(child => {
-            if (child.userData.type === 'trajectory' || child.userData.type === 'orbit' || child.userData.type === 'orbitLine' || child.userData.type === 'manifold' || child.userData.type === 'fixedPoint' || child.userData.type === 'bde' || child.userData.type === 'normalFan') {
+            if (child.userData.type === 'trajectory' || child.userData.type === 'orbit' || child.userData.type === 'orbitLine' || child.userData.type === 'manifold' || child.userData.type === 'geometricOffset' || child.userData.type === 'basin' || child.userData.type === 'fixedPoint' || child.userData.type === 'bde') {
                 toRemove.push(child);
             }
         });
@@ -1712,6 +1717,68 @@ const SetValuedViz = () => {
             });
         }
 
+        if (geometricOffsetState.showContours && geometricOffsetState.result?.levels) {
+            geometricOffsetState.result.levels.forEach((level, levelIndex) => {
+                (level.boundary_components || []).forEach(component => {
+                    const points = (component.points || []).map(point => new THREE.Vector3(point.x, point.y, 0.22 + levelIndex * 0.005));
+                    if (points.length < 3) return;
+                    const geometry = new THREE.BufferGeometry().setFromPoints(points);
+                    const material = new THREE.LineDashedMaterial({
+                        color: '#3f9186',
+                        dashSize: 0.035,
+                        gapSize: 0.018,
+                        transparent: true,
+                        opacity: 0.96
+                    });
+                    const line = new THREE.LineLoop(geometry, material);
+                    line.computeLineDistances();
+                    line.userData = { type: 'geometricOffset', level: level.level, targetDistance: level.target_distance };
+                    scene.add(line);
+                });
+            });
+        }
+
+        if (basinState.showBasin && basinState.result?.projection) {
+            const addBasinLayer = (cells, style) => {
+                if (cells.length === 0) return;
+                const geometry = new THREE.PlaneGeometry(
+                    basinState.result.dx * 0.985,
+                    basinState.result.dy * 0.985
+                );
+                const material = new THREE.MeshBasicMaterial({
+                    color: style.color,
+                    transparent: true,
+                    opacity: style.opacity,
+                    depthWrite: false,
+                    side: THREE.DoubleSide,
+                    toneMapped: false
+                });
+                const mesh = new THREE.InstancedMesh(geometry, material, cells.length);
+                const matrix = new THREE.Matrix4();
+                cells.forEach(({ cell }, index) => {
+                    matrix.makeTranslation(cell.x, cell.y, style.z);
+                    mesh.setMatrixAt(index, matrix);
+                });
+                mesh.instanceMatrix.needsUpdate = true;
+                mesh.renderOrder = style.renderOrder;
+                mesh.userData.type = 'basin';
+                scene.add(mesh);
+            };
+
+            addBasinLayer(
+                basinState.result.projection
+                    .map(cell => ({ cell, coverage: Math.max(0, cell.outer_coverage - cell.inner_coverage) }))
+                    .filter(item => item.coverage > 1e-12),
+                BASIN_LAYER_STYLES.outer
+            );
+            addBasinLayer(
+                basinState.result.projection
+                    .map(cell => ({ cell, coverage: cell.inner_coverage }))
+                    .filter(item => item.coverage > 1e-12),
+                BASIN_LAYER_STYLES.inner
+            );
+        }
+
         if (dynamicSystem === 'duffing_ode' && bdeState.points && bdeState.points.length > 1) {
             const pts = bdeState.points.map(p => new THREE.Vector3(p.x, p.y, 0.15));
             pts.push(pts[0].clone());
@@ -1749,92 +1816,6 @@ const SetValuedViz = () => {
             };
             scene.add(sphere);
         });
-
-        if (type === 'discrete' && manifoldState.showNormalFan) {
-            const basePoint = manifoldState.hasStarted && manifoldState.currentPoint
-                ? manifoldState.currentPoint
-                : manifoldState.startPoint;
-            const count = Math.max(4, Math.min(32, Math.floor(manifoldState.normalFanCount || 8)));
-            const viewScale = Math.max(
-                0.08,
-                Math.min(viewRange.xMax - viewRange.xMin, viewRange.yMax - viewRange.yMin) * 0.055
-            );
-            const tangentHalfLength = viewScale * 0.92;
-            const normalLength = viewScale * 0.78;
-            const tangentPoints = [];
-            const normalPoints = [];
-
-            for (let k = 0; k < count; k += 1) {
-                const theta = Math.PI * 2 * (k + 0.5) / count;
-                const nx = Math.cos(theta);
-                const ny = Math.sin(theta);
-                const tx = -ny;
-                const ty = nx;
-
-                tangentPoints.push(
-                    new THREE.Vector3(basePoint.x - tx * tangentHalfLength, basePoint.y - ty * tangentHalfLength, 0.31),
-                    new THREE.Vector3(basePoint.x + tx * tangentHalfLength, basePoint.y + ty * tangentHalfLength, 0.31)
-                );
-                normalPoints.push(
-                    new THREE.Vector3(basePoint.x, basePoint.y, 0.33),
-                    new THREE.Vector3(basePoint.x + nx * normalLength, basePoint.y + ny * normalLength, 0.33)
-                );
-            }
-
-            const tangentGeom = new THREE.BufferGeometry().setFromPoints(tangentPoints);
-            const tangentMat = new THREE.LineBasicMaterial({
-                color: new THREE.Color('#7d7168'),
-                transparent: true,
-                opacity: 0.42,
-                depthWrite: false
-            });
-            const tangentLines = new THREE.LineSegments(tangentGeom, tangentMat);
-            tangentLines.userData.type = 'normalFan';
-            scene.add(tangentLines);
-
-            const normalGeom = new THREE.BufferGeometry().setFromPoints(normalPoints);
-            const normalMat = new THREE.LineBasicMaterial({
-                color: new THREE.Color('#ddd5c8'),
-                transparent: true,
-                opacity: 0.86,
-                depthWrite: false
-            });
-            const normalLines = new THREE.LineSegments(normalGeom, normalMat);
-            normalLines.userData.type = 'normalFan';
-            scene.add(normalLines);
-
-            const centerGeom = new THREE.RingGeometry(viewScale * 0.08, viewScale * 0.12, 24);
-            const centerMat = new THREE.MeshBasicMaterial({
-                color: new THREE.Color('#ddd5c8'),
-                transparent: true,
-                opacity: 0.9,
-                side: THREE.DoubleSide,
-                depthWrite: false
-            });
-            const center = new THREE.Mesh(centerGeom, centerMat);
-            center.position.set(basePoint.x, basePoint.y, 0.35);
-            center.userData.type = 'normalFan';
-            scene.add(center);
-
-            const currentNorm = Math.hypot(basePoint.nx || 0, basePoint.ny || 0);
-            if (currentNorm > 1e-12) {
-                const nx = basePoint.nx / currentNorm;
-                const ny = basePoint.ny / currentNorm;
-                const selectedGeom = new THREE.BufferGeometry().setFromPoints([
-                    new THREE.Vector3(basePoint.x, basePoint.y, 0.36),
-                    new THREE.Vector3(basePoint.x + nx * normalLength * 1.15, basePoint.y + ny * normalLength * 1.15, 0.36)
-                ]);
-                const selectedMat = new THREE.LineBasicMaterial({
-                    color: new THREE.Color(ORBIT_COLORS.trajectory),
-                    transparent: true,
-                    opacity: 0.95,
-                    depthWrite: false
-                });
-                const selectedLine = new THREE.LineSegments(selectedGeom, selectedMat);
-                selectedLine.userData.type = 'normalFan';
-                scene.add(selectedLine);
-            }
-        }
 
         if (manifoldState.showTrail && manifoldState.trajectoryPoints.length > 0) {
             if (dynamicSystem === 'duffing_ode') {
@@ -1921,7 +1902,7 @@ const SetValuedViz = () => {
                 }
             });
         }
-    }, [periodicState, manifoldState, filters, bdeState, dynamicSystem, type, viewRange]);
+    }, [periodicState, manifoldState, geometricOffsetState, basinState, filters, bdeState, dynamicSystem, type, viewRange]);
 
     const getOrbitColor = (orbit) => {
         const { stability } = orbit;
@@ -2300,132 +2281,6 @@ const SetValuedViz = () => {
         computeUlam
     ]);
 
-    const computeHittingContours = useCallback(async () => {
-        if (!wasmModule || dynamicSystem !== 'henon') return;
-        const settings = normalizeHittingContourSettings({
-            sampleGridSize: hittingContourState.sampleGridSize,
-            thetaGridSize: hittingContourState.thetaGridSize,
-            maxPeriod: hittingContourState.maxPeriod,
-            maxLevel: hittingContourState.maxLevel,
-            ulamSubdivisions: hittingContourState.ulamSubdivisions,
-            ulamPointsPerBox: hittingContourState.ulamPointsPerBox,
-            ulamIterations: hittingContourState.ulamIterations,
-            supportMass: hittingContourState.supportMass,
-            hitTolerance: hittingContourState.hitTolerance,
-            residualThreshold: hittingContourState.residualThreshold
-        });
-        const requestId = ++hittingContourRequestRef.current;
-        setHittingContourState(prev => ({
-            ...prev,
-            ...settings,
-            isComputing: true,
-            error: null
-        }));
-
-        try {
-            const result = await runComputeTask('computeHittingContours', {
-                params: {
-                    a: params.a,
-                    b: params.b,
-                    epsilon: params.epsilon
-                },
-                viewRange: {
-                    xMin: viewRange.xMin,
-                    xMax: viewRange.xMax,
-                    yMin: viewRange.yMin,
-                    yMax: viewRange.yMax
-                },
-                settings
-            });
-
-            if (requestId !== hittingContourRequestRef.current) return;
-            setHittingContourState(prev => {
-                const levels = Array.isArray(result?.levelsPresent) ? result.levelsPresent : [];
-                const selectedLevels = Array.isArray(prev.selectedLevels)
-                    ? prev.selectedLevels.filter(level => levels.includes(level))
-                    : [];
-                return {
-                    ...prev,
-                    isComputing: false,
-                    result,
-                    selectedLevels,
-                    selectedLevel: selectedLevels.length > 0 ? selectedLevels[0] : 'all',
-                    error: null
-                };
-            });
-        } catch (err) {
-            if (requestId !== hittingContourRequestRef.current) return;
-            console.error('Hitting contour computation failed:', err);
-            setHittingContourState(prev => ({
-                ...prev,
-                isComputing: false,
-                error: err?.message || 'Computation failed'
-            }));
-        }
-    }, [
-        wasmModule,
-        dynamicSystem,
-        hittingContourState.sampleGridSize,
-        hittingContourState.thetaGridSize,
-        hittingContourState.maxPeriod,
-        hittingContourState.maxLevel,
-        hittingContourState.ulamSubdivisions,
-        hittingContourState.ulamPointsPerBox,
-        hittingContourState.ulamIterations,
-        hittingContourState.supportMass,
-        hittingContourState.hitTolerance,
-        hittingContourState.residualThreshold,
-        params.a,
-        params.b,
-        params.epsilon,
-        viewRange,
-        runComputeTask
-    ]);
-
-    useEffect(() => {
-        if (dynamicSystem !== 'henon') {
-            setHittingContourState(prev => prev.result || prev.error
-                ? { ...prev, isComputing: false, result: null, error: null }
-                : prev);
-            return;
-        }
-        if (!hittingContourState.showOverlay || !wasmModule) return;
-
-        if (hittingContourDebounceRef.current) {
-            clearTimeout(hittingContourDebounceRef.current);
-        }
-
-        hittingContourDebounceRef.current = setTimeout(() => {
-            computeHittingContours();
-        }, 300);
-
-        return () => {
-            if (hittingContourDebounceRef.current) {
-                clearTimeout(hittingContourDebounceRef.current);
-            }
-        };
-    }, [
-        dynamicSystem,
-        hittingContourState.showOverlay,
-        hittingContourState.sampleGridSize,
-        hittingContourState.thetaGridSize,
-        hittingContourState.maxPeriod,
-        hittingContourState.maxLevel,
-        hittingContourState.ulamSubdivisions,
-        hittingContourState.ulamPointsPerBox,
-        hittingContourState.ulamIterations,
-        hittingContourState.supportMass,
-        hittingContourState.hitTolerance,
-        hittingContourState.residualThreshold,
-        params.a,
-        params.b,
-        params.epsilon,
-        viewRange,
-        wasmModule,
-        computeRequestId,
-        computeHittingContours
-    ]);
-
     useEffect(() => {
         if (!ulamState.showUlamOverlay || !ulamState.gridBoxes.length) return;
 
@@ -2556,248 +2411,6 @@ const SetValuedViz = () => {
         return cleanup;
     }, [ulamState.showUlamOverlay, ulamState.gridBoxes, ulamState.selectedBoxIndex, ulamState.transitions, ulamState.invariantMeasure, ulamState.currentBoxIndex, ulamState.showCurrentBox]);
 
-    useEffect(() => {
-        const scene = sceneRef.current;
-        if (!scene) return;
-
-        const cleanup = () => {
-            const oldGroup = scene.getObjectByName('hitting-level-overlay');
-            if (!oldGroup) return;
-            oldGroup.traverse((child) => {
-                if (child.geometry) child.geometry.dispose();
-                if (child.material) child.material.dispose();
-            });
-            scene.remove(oldGroup);
-        };
-
-        cleanup();
-
-        if (!hittingContourState.showOverlay || !hittingContourState.result) {
-            return cleanup;
-        }
-
-        const result = hittingContourState.result;
-        const settings = result.settings || {};
-        const gridSize = settings.sampleGridSize || hittingContourState.sampleGridSize;
-        const dx = (viewRange.xMax - viewRange.xMin) / gridSize;
-        const dy = (viewRange.yMax - viewRange.yMin) / gridSize;
-        const layoutMode = hittingContourState.layoutMode || 'topographic';
-        const selectedLevels = Array.isArray(hittingContourState.selectedLevels)
-            ? hittingContourState.selectedLevels
-            : [];
-        const levelSelection = selectedLevels.length > 0 ? selectedLevels : 'all';
-        const group = new THREE.Group();
-        group.name = 'hitting-level-overlay';
-
-        if (layoutMode === 'spatial') {
-            const visibleEntries = getVisibleHittingCells(result, levelSelection);
-            if (visibleEntries.length > 0 && dx > 0 && dy > 0) {
-                const geometry = new THREE.PlaneGeometry(1, 1);
-                const material = new THREE.MeshBasicMaterial({
-                    color: 0xffffff,
-                    transparent: true,
-                    opacity: 0.58,
-                    side: THREE.DoubleSide,
-                    depthWrite: false
-                });
-                const mesh = new THREE.InstancedMesh(geometry, material, visibleEntries.length);
-                mesh.name = 'hitting-level-cells';
-                mesh.userData.type = 'hittingLevelCells';
-                mesh.userData.entries = visibleEntries;
-
-                const dummy = new THREE.Object3D();
-                const color = new THREE.Color();
-                const maxLevel = Math.max(1, settings.maxLevel || hittingContourState.maxLevel);
-
-                visibleEntries.forEach(({ cell, hit }, instanceId) => {
-                    dummy.position.set(cell.x, cell.y, -0.025);
-                    dummy.scale.set(dx * 0.82, dy * 0.82, 1);
-                    dummy.updateMatrix();
-                    mesh.setMatrixAt(instanceId, dummy.matrix);
-
-                    color.setHex(getStabilityColorHex(hit.stability));
-                    const levelFactor = 1 - Math.min(maxLevel, hit.level || maxLevel) / (maxLevel + 1);
-                    color.lerp(new THREE.Color(0xddd5c8), 0.18 + 0.28 * levelFactor);
-                    mesh.setColorAt(instanceId, color);
-                });
-
-                mesh.instanceMatrix.needsUpdate = true;
-                if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
-                group.add(mesh);
-            }
-
-            (result.targets || []).forEach((target) => {
-                const geometry = new THREE.SphereGeometry(0.022, 12, 12);
-                const material = new THREE.MeshBasicMaterial({
-                    color: new THREE.Color(getStabilityColorHex(target.stability)),
-                    transparent: true,
-                    opacity: 0.95,
-                    depthWrite: false
-                });
-                const marker = new THREE.Mesh(geometry, material);
-                marker.position.set(target.x, target.y, 0.36);
-                marker.userData = {
-                    type: 'hittingTarget',
-                    target
-                };
-                group.add(marker);
-            });
-        } else {
-            const targetContours = getHittingTargetContours(result, levelSelection);
-            const viewWidth = viewRange.xMax - viewRange.xMin;
-            const viewHeight = viewRange.yMax - viewRange.yMin;
-            const count = targetContours.length;
-            const aspect = viewWidth > 0 && viewHeight > 0 ? viewWidth / viewHeight : 1;
-            const cols = Math.max(1, Math.ceil(Math.sqrt(count * aspect)));
-            const rows = Math.max(1, Math.ceil(count / cols));
-            const padX = viewWidth * 0.10;
-            const padY = viewHeight * 0.10;
-            const cellW = count > 0 ? (viewWidth - 2 * padX) / cols : 0;
-            const cellH = count > 0 ? (viewHeight - 2 * padY) / rows : 0;
-            const minCell = Math.max(0.01, Math.min(cellW, cellH));
-            const maxLevel = Math.max(1, settings.maxLevel || hittingContourState.maxLevel);
-            const contourHighlight = new THREE.Color(0xddd5c8);
-
-            const gridPoints = buildAbstractGrid(viewRange, 12);
-            if (gridPoints.length > 0) {
-                const gridGeometry = new THREE.BufferGeometry().setFromPoints(gridPoints);
-                const gridMaterial = new THREE.LineBasicMaterial({
-                    color: 0x4a4540,
-                    transparent: true,
-                    opacity: 0.22,
-                    depthWrite: false
-                });
-                const abstractGrid = new THREE.LineSegments(gridGeometry, gridMaterial);
-                abstractGrid.name = 'hitting-topographic-grid';
-                abstractGrid.userData.type = 'hittingTopographicGrid';
-                group.add(abstractGrid);
-            }
-
-            targetContours.forEach((entry, index) => {
-                const col = index % cols;
-                const row = Math.floor(index / cols);
-                const centerX = viewRange.xMin + padX + cellW * (col + 0.5);
-                const centerY = viewRange.yMax - padY - cellH * (row + 0.5);
-                const rings = entry.rings;
-                const baseColor = new THREE.Color(getStabilityColorHex(entry.target.stability));
-                const outerRadius = minCell * 0.38;
-                const innerRadius = minCell * 0.09;
-
-                rings.forEach((ring) => {
-                    const levelRatio = Math.min(maxLevel, Math.max(1, ring.level)) / Math.max(1, maxLevel);
-                    const radius = innerRadius + (outerRadius - innerRadius) * levelRatio;
-                    const color = baseColor.clone().lerp(contourHighlight, 0.18 + 0.26 * levelRatio);
-                    if (hittingContourState.showLevelRings !== false) {
-                        const geometry = new THREE.BufferGeometry().setFromPoints(
-                            buildCircleRingPoints(centerX, centerY, radius)
-                        );
-                        const material = new THREE.LineBasicMaterial({
-                            color,
-                            transparent: true,
-                            opacity: selectedLevels.length === 0 ? 0.48 : 0.68,
-                            depthWrite: false
-                        });
-                        const line = new THREE.LineLoop(geometry, material);
-                        line.userData = {
-                            type: 'hittingContourRing',
-                            target: entry.target,
-                            level: ring.level,
-                            count: ring.count,
-                            points: ring.points
-                        };
-                        group.add(line);
-                    }
-
-                    if (hittingContourState.showLevelRings !== false) {
-                        const hitAreaGeometry = new THREE.TorusGeometry(radius, minCell * 0.009, 8, 128);
-                        const hitAreaMaterial = new THREE.MeshBasicMaterial({
-                            color,
-                            transparent: true,
-                            opacity: 0.001,
-                            depthWrite: false,
-                            side: THREE.DoubleSide
-                        });
-                        const hitArea = new THREE.Mesh(hitAreaGeometry, hitAreaMaterial);
-                        hitArea.position.set(centerX, centerY, 0.345);
-                        hitArea.userData = {
-                            type: 'hittingContourRing',
-                            target: entry.target,
-                            level: ring.level,
-                            count: ring.count,
-                            points: ring.points
-                        };
-                        group.add(hitArea);
-                    }
-
-                    if (ring.points.length > 0) {
-                        const pointGeometry = new THREE.SphereGeometry(minCell * 0.012, 10, 10);
-                        const pointMaterial = new THREE.MeshBasicMaterial({
-                            color,
-                            transparent: true,
-                            opacity: 0.98,
-                            depthWrite: false
-                        });
-                        const pointMesh = new THREE.InstancedMesh(pointGeometry, pointMaterial, ring.points.length);
-                        pointMesh.name = 'hitting-level-points';
-                        pointMesh.userData = {
-                            type: 'hittingLevelPoint',
-                            target: entry.target,
-                            level: ring.level,
-                            points: ring.points
-                        };
-                        const dummy = new THREE.Object3D();
-                        const angleOffset = ((entry.target.targetIndex || 0) * 0.73 + ring.level * 0.19) % (Math.PI * 2);
-                        ring.points.forEach((point, pointIndex) => {
-                            const angle = angleOffset + (pointIndex / ring.points.length) * Math.PI * 2;
-                            dummy.position.set(
-                                centerX + Math.cos(angle) * radius,
-                                centerY + Math.sin(angle) * radius,
-                                0.39
-                            );
-                            dummy.updateMatrix();
-                            pointMesh.setMatrixAt(pointIndex, dummy.matrix);
-                        });
-                        pointMesh.instanceMatrix.needsUpdate = true;
-                        group.add(pointMesh);
-                    }
-                });
-
-                const markerGeometry = new THREE.SphereGeometry(minCell * 0.035, 16, 16);
-                const markerMaterial = new THREE.MeshBasicMaterial({
-                    color: baseColor,
-                    transparent: true,
-                    opacity: 0.98,
-                    depthWrite: false
-                });
-                const marker = new THREE.Mesh(markerGeometry, markerMaterial);
-                marker.position.set(centerX, centerY, 0.38);
-                marker.userData = {
-                    type: 'hittingTarget',
-                    target: entry.target,
-                    topographic: {
-                        totalHits: entry.totalHits,
-                        bestLevel: entry.bestLevel,
-                        ringCount: rings.length
-                    }
-                };
-                group.add(marker);
-            });
-        }
-
-        scene.add(group);
-        return cleanup;
-    }, [
-        hittingContourState.showOverlay,
-        hittingContourState.result,
-        hittingContourState.selectedLevel,
-        hittingContourState.selectedLevels,
-        hittingContourState.layoutMode,
-        hittingContourState.showLevelRings,
-        hittingContourState.sampleGridSize,
-        hittingContourState.maxLevel,
-        viewRange
-    ]);
-
     const SYSTEMS = {
         discrete: [
             { id: 'henon', name: 'Hénon Map', presets: [{ name: 'Standard', vals: { a: 1.4, b: 0.3 } }, { name: 'Lozi-like', vals: { a: 1.7, b: 0.5 } }] },
@@ -2863,12 +2476,19 @@ const SetValuedViz = () => {
                 resetViewRange={resetViewRange}
                 manifoldState={manifoldState}
                 setManifoldState={setManifoldState}
+                geometricOffsetState={geometricOffsetState}
+                setGeometricOffsetState={setGeometricOffsetState}
+                canComputeGeometricOffsets={!manifoldState.isComputing && geometricOffsetSeed.length >= 3}
+                computeGeometricOffsets={computeGeometricOffsets}
+                basinState={basinState}
+                setBasinState={setBasinState}
+                canComputeBasin={!manifoldState.isComputing && !basinState.isComputing && basinTarget.length >= 3}
+                basinTargetPointCount={basinTarget.length}
+                computeBasin={computeBasin}
                 ORBIT_COLORS={ORBIT_COLORS}
                 filters={filters}
                 setFilters={setFilters}
                 periodicState={periodicState}
-                hittingContourState={hittingContourState}
-                setHittingContourState={setHittingContourState}
                 periodicSearchSettings={draftPeriodicSearchSettings}
                 updatePeriodicSearchSettings={updatePeriodicSearchSettings}
                 updateStartPoint={updateStartPoint}
@@ -2895,8 +2515,9 @@ const SetValuedViz = () => {
                 canvasRef={canvasRef}
                 tooltip={tooltip}
                 manifoldState={manifoldState}
+                geometricOffsetState={geometricOffsetState}
+                basinState={basinState}
                 ulamState={ulamState}
-                hittingContourState={hittingContourState}
                 savePNG={savePNG}
                 handleZoomIn={() => { }}
                 handleZoomOut={() => { }}

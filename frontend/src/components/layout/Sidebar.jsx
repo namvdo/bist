@@ -7,10 +7,11 @@ import { VisualizationPanel } from '../sidebar/VisualizationPanel';
 import { StartingPoint } from '../sidebar/StartingPoint';
 import { PeriodicOrbitsPanel } from '../sidebar/PeriodicOrbitsPanel';
 import { PeriodicSearchPanel } from '../sidebar/PeriodicSearchPanel';
-import { HittingContoursPanel } from '../sidebar/HittingContoursPanel';
 import { UlamPanel } from '../sidebar/UlamPanel';
 import { AnimationPanel } from '../sidebar/AnimationPanel';
 import { ParameterSweepPanel } from '../sidebar/ParameterSweepPanel';
+import { GeometricOffsetsPanel } from '../sidebar/GeometricOffsetsPanel';
+import { BasinApproximationPanel } from '../sidebar/BasinApproximationPanel';
 import { InfoStrip } from './InfoStrip';
 import { ControlsBar } from './ControlsBar';
 
@@ -80,6 +81,23 @@ export const Sidebar = (props) => {
               setManifoldState={props.setManifoldState}
               ORBIT_COLORS={ORBIT_COLORS}
             />
+            {props.dynamicSystem === 'henon' && (
+              <>
+                <GeometricOffsetsPanel
+                  state={props.geometricOffsetState}
+                  setState={props.setGeometricOffsetState}
+                  canCompute={props.canComputeGeometricOffsets}
+                  compute={props.computeGeometricOffsets}
+                />
+                <BasinApproximationPanel
+                  state={props.basinState}
+                  setState={props.setBasinState}
+                  canCompute={props.canComputeBasin}
+                  targetPointCount={props.basinTargetPointCount}
+                  compute={props.computeBasin}
+                />
+              </>
+            )}
             <PeriodicOrbitsPanel
               manifoldState={props.manifoldState}
               setManifoldState={props.setManifoldState}
@@ -87,13 +105,6 @@ export const Sidebar = (props) => {
               setFilters={props.setFilters}
               periodicState={props.periodicState}
             />
-            {props.dynamicSystem === 'henon' && (
-              <HittingContoursPanel
-                dynamicSystem={props.dynamicSystem}
-                hittingContourState={props.hittingContourState}
-                setHittingContourState={props.setHittingContourState}
-              />
-            )}
           </>
         )}
 

@@ -462,33 +462,25 @@ const getUlamTransitions = async (payload) => {
   return cachedUlamComputer.get_transitions(payload.index) || [];
 };
 
-const computeHittingContours = async (payload) => {
+const computeGeometricOffsets = async (payload) => {
   const wasm = await ensureWasm();
-  const { params, viewRange, settings } = payload;
-
-  if (typeof wasm.computeHenonHittingLevelSets !== 'function') {
-    throw new Error('Hénon hitting-level contour export is unavailable');
+  if (typeof wasm.computeGeometricOffsetContours !== 'function') {
+    throw new Error('Geometric offset export is unavailable; rebuild WebAssembly');
   }
-
-  return wasm.computeHenonHittingLevelSets(
-    params.a,
-    params.b,
-    params.epsilon,
-    viewRange.xMin,
-    viewRange.xMax,
-    viewRange.yMin,
-    viewRange.yMax,
-    settings.maxPeriod,
-    settings.ulamSubdivisions,
-    settings.ulamPointsPerBox,
-    settings.ulamIterations,
-    settings.supportMass,
-    settings.thetaGridSize,
-    settings.sampleGridSize,
-    settings.maxLevel,
-    settings.hitTolerance,
-    settings.residualThreshold
+  const { boundary, params, settings, viewRange } = payload;
+  return wasm.computeGeometricOffsetContours(
+    boundary, params.epsilon,
+    settings.numLevels, settings.resolution,
+    viewRange.xMin, viewRange.xMax, viewRange.yMin, viewRange.yMax
   );
+};
+
+const computeExtendedBasin = async (payload) => {
+  const wasm = await ensureWasm();
+  if (typeof wasm.computeHenonExtendedBasin !== 'function') {
+    throw new Error('Extended Hénon basin export is unavailable; rebuild WebAssembly');
+  }
+  return wasm.computeHenonExtendedBasin(payload.targetPoints, payload.config);
 };
 
 self.onmessage = async (event) => {
@@ -503,8 +495,10 @@ self.onmessage = async (event) => {
       result = await computeManifolds(payload);
     } else if (kind === 'computeUlam') {
       result = await computeUlam(payload);
-    } else if (kind === 'computeHittingContours') {
-      result = await computeHittingContours(payload);
+    } else if (kind === 'computeGeometricOffsets') {
+      result = await computeGeometricOffsets(payload);
+    } else if (kind === 'computeExtendedBasin') {
+      result = await computeExtendedBasin(payload);
     } else if (kind === 'getUlamTransitions') {
       result = await getUlamTransitions(payload);
     } else {
