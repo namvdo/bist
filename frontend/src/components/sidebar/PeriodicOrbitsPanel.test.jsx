@@ -5,7 +5,6 @@ import { PeriodicOrbitsPanel } from './PeriodicOrbitsPanel';
 const baseProps = {
   manifoldState: {
     showOrbits: true,
-    showOrbitLines: false,
     showTrail: true,
     showAttractingRegions: true,
     fixedPoints: []
@@ -27,6 +26,14 @@ const baseProps = {
 };
 
 describe('PeriodicOrbitsPanel', () => {
+  it('keeps orbit markers and trajectory controls without the redundant orbit-lines toggle', () => {
+    render(<PeriodicOrbitsPanel {...baseProps} />);
+
+    expect(screen.getByLabelText('Orbit markers')).toBeInTheDocument();
+    expect(screen.getByLabelText('Trajectory trail')).toBeInTheDocument();
+    expect(screen.queryByLabelText('Orbit lines')).toBeNull();
+  });
+
   it('shows period counts from periodic orbit data', () => {
     const periodicState = {
       isReady: true,

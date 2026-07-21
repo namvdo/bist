@@ -4,7 +4,14 @@ import { Shell } from './components/layout/Shell';
 import { Sidebar } from './components/layout/Sidebar';
 import { Viewport } from './components/layout/Viewport';
 import { normalizeParams } from './utils/paramUtils';
-import { DEFAULT_VIEW_RANGE, RANGE_LIMIT, normalizeViewRange } from './utils/viewRange';
+import {
+    DEFAULT_VIEW_RANGE,
+    RANGE_LIMIT,
+    ZOOM_IN_FACTOR,
+    ZOOM_OUT_FACTOR,
+    normalizeViewRange,
+    zoomViewRange
+} from './utils/viewRange';
 import {
     DEFAULT_PERIODIC_SEARCH_SETTINGS,
     normalizePeriodicSearchSettings
@@ -247,6 +254,7 @@ const SetValuedViz = () => {
     const cameraRef = useRef(null);
     const animationFrameRef = useRef(null);
     const batchAnimationRef = useRef(null);
+    const viewTransitionFrameRef = useRef(null);
     const manifoldDebounceRef = useRef(null);
 
     const [dynamicSystem, setDynamicSystem] = useState('duffing_ode'); // 'henon', 'duffing', or 'custom'
@@ -279,11 +287,9 @@ const SetValuedViz = () => {
         isComputing: false,
         isReady: false,
         showOrbits: true,
-        showOrbitLines: false,
         showUnstableManifold: false,
         showStableManifold: false,
         intersectionThreshold: 0.05,
-        highlightedOrbitId: null,
         currentPoint: { x: 0.1, y: 0.1, nx: 1.0, ny: 0.0 }, // 4D point for boundary map
         trajectoryPoints: [],
         iteration: 0,
@@ -460,7 +466,10 @@ const SetValuedViz = () => {
         data: null
     });
     const [viewRange, setViewRange] = useState(DEFAULT_VIEW_RANGE);
-    const viewRangeRef = useRef(viewRange);
+    const computationViewRangeRef = useRef(viewRange);
+    const [viewportRange, setViewportRange] = useState(DEFAULT_VIEW_RANGE);
+    const viewportRangeRef = useRef(viewportRange);
+    const viewportRangeTargetRef = useRef(viewportRange);
     const gridGroupRef = useRef(null);
 
     const raycasterRef = useRef(new THREE.Raycaster());
@@ -514,22 +523,6 @@ const SetValuedViz = () => {
     }, []);
 
 
-    const updateViewRange = useCallback((patch) => {
-        setViewRange(prev => {
-            const next = { ...prev };
-            Object.entries(patch).forEach(([key, value]) => {
-                if (Number.isFinite(value)) {
-                    next[key] = value;
-                }
-            });
-            return normalizeViewRange(next);
-        });
-    }, []);
-
-    const resetViewRange = useCallback(() => {
-        setViewRange(DEFAULT_VIEW_RANGE);
-    }, []);
-
     const applyViewRangeToCamera = useCallback((range) => {
         const camera = cameraRef.current;
         if (!camera) return;
@@ -553,6 +546,105 @@ const SetValuedViz = () => {
         camera.updateProjectionMatrix();
     }, []);
 
+    const cancelViewRangeTransition = useCallback(() => {
+        if (viewTransitionFrameRef.current !== null) {
+            cancelAnimationFrame(viewTransitionFrameRef.current);
+            viewTransitionFrameRef.current = null;
+        }
+    }, []);
+
+    const transitionViewRange = useCallback((targetRange) => {
+        const target = normalizeViewRange(targetRange);
+        const start = { ...viewportRangeRef.current };
+        cancelViewRangeTransition();
+        viewportRangeTargetRef.current = target;
+
+        const reduceMotion = typeof window.matchMedia === 'function'
+            && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+        if (!cameraRef.current || reduceMotion) {
+            viewportRangeRef.current = target;
+            setViewportRange(target);
+            return;
+        }
+
+        const scene = sceneRef.current;
+        if (scene) {
+            if (gridGroupRef.current) {
+                scene.remove(gridGroupRef.current);
+            }
+            gridGroupRef.current = createCoordinateSystem(scene, target);
+        }
+
+        const startedAt = performance.now();
+        const durationMs = 180;
+        const animateRange = (timestamp) => {
+            const progress = Math.min(1, (timestamp - startedAt) / durationMs);
+            const eased = 1 - ((1 - progress) ** 3);
+            const intermediate = {
+                xMin: start.xMin + (target.xMin - start.xMin) * eased,
+                xMax: start.xMax + (target.xMax - start.xMax) * eased,
+                yMin: start.yMin + (target.yMin - start.yMin) * eased,
+                yMax: start.yMax + (target.yMax - start.yMax) * eased
+            };
+            viewportRangeRef.current = intermediate;
+            applyViewRangeToCamera(intermediate);
+
+            if (progress < 1) {
+                viewTransitionFrameRef.current = requestAnimationFrame(animateRange);
+                return;
+            }
+
+            viewTransitionFrameRef.current = null;
+            viewportRangeRef.current = target;
+            setViewportRange(target);
+        };
+
+        viewTransitionFrameRef.current = requestAnimationFrame(animateRange);
+    }, [applyViewRangeToCamera, cancelViewRangeTransition]);
+
+    const updateViewRange = useCallback((patch) => {
+        cancelViewRangeTransition();
+        const next = { ...computationViewRangeRef.current };
+        Object.entries(patch).forEach(([key, value]) => {
+            if (Number.isFinite(value)) {
+                next[key] = value;
+            }
+        });
+        const normalized = normalizeViewRange(next);
+        computationViewRangeRef.current = normalized;
+        viewportRangeRef.current = normalized;
+        viewportRangeTargetRef.current = normalized;
+        setViewRange(normalized);
+        setViewportRange(normalized);
+    }, [cancelViewRangeTransition]);
+
+    const resetViewRange = useCallback(() => {
+        cancelViewRangeTransition();
+        computationViewRangeRef.current = DEFAULT_VIEW_RANGE;
+        viewportRangeRef.current = DEFAULT_VIEW_RANGE;
+        viewportRangeTargetRef.current = DEFAULT_VIEW_RANGE;
+        setViewRange(DEFAULT_VIEW_RANGE);
+        setViewportRange(DEFAULT_VIEW_RANGE);
+    }, [cancelViewRangeTransition]);
+
+    const resetViewportRange = useCallback(() => {
+        transitionViewRange(computationViewRangeRef.current);
+    }, [transitionViewRange]);
+
+    const handleZoomIn = useCallback(() => {
+        const baseRange = viewTransitionFrameRef.current !== null
+            ? viewportRangeTargetRef.current
+            : viewportRangeRef.current;
+        transitionViewRange(zoomViewRange(baseRange, ZOOM_IN_FACTOR));
+    }, [transitionViewRange]);
+
+    const handleZoomOut = useCallback(() => {
+        const baseRange = viewTransitionFrameRef.current !== null
+            ? viewportRangeTargetRef.current
+            : viewportRangeRef.current;
+        transitionViewRange(zoomViewRange(baseRange, ZOOM_OUT_FACTOR));
+    }, [transitionViewRange]);
+
     useEffect(() => {
         if (!canvasRef.current) return;
 
@@ -573,12 +665,12 @@ const SetValuedViz = () => {
         renderer.setPixelRatio(window.devicePixelRatio);
         rendererRef.current = renderer;
 
-        viewRangeRef.current = viewRange;
-        applyViewRangeToCamera(viewRange);
-        gridGroupRef.current = createCoordinateSystem(scene, viewRange);
+        viewportRangeRef.current = viewportRange;
+        applyViewRangeToCamera(viewportRange);
+        gridGroupRef.current = createCoordinateSystem(scene, viewportRange);
 
         const handleResize = () => {
-            const range = viewRangeRef.current;
+            const range = viewportRangeRef.current;
             applyViewRangeToCamera(range);
             renderer.setSize(window.innerWidth - 268, window.innerHeight);
         };
@@ -594,20 +686,26 @@ const SetValuedViz = () => {
             window.removeEventListener('resize', handleResize);
             if (animationFrameRef.current) cancelAnimationFrame(animationFrameRef.current);
             if (batchAnimationRef.current) cancelAnimationFrame(batchAnimationRef.current);
+            if (viewTransitionFrameRef.current) cancelAnimationFrame(viewTransitionFrameRef.current);
             renderer.dispose();
         };
     }, [applyViewRangeToCamera]);
 
     useEffect(() => {
-        viewRangeRef.current = viewRange;
+        viewportRangeRef.current = viewportRange;
+        viewportRangeTargetRef.current = viewportRange;
         const scene = sceneRef.current;
         if (!scene) return;
         if (gridGroupRef.current) {
             scene.remove(gridGroupRef.current);
         }
-        gridGroupRef.current = createCoordinateSystem(scene, viewRange);
-        applyViewRangeToCamera(viewRange);
-    }, [viewRange, applyViewRangeToCamera]);
+        gridGroupRef.current = createCoordinateSystem(scene, viewportRange);
+        applyViewRangeToCamera(viewportRange);
+    }, [viewportRange, applyViewRangeToCamera]);
+
+    useEffect(() => {
+        computationViewRangeRef.current = viewRange;
+    }, [viewRange]);
 
     useEffect(() => {
         const loadWasm = async () => {
@@ -799,7 +897,6 @@ const SetValuedViz = () => {
             showUnstableManifold: false,
             showStableManifold: false,
             showOrbits: true,
-            showOrbitLines: false,
             showTrail: true,
         }));
         setBdeState(prev => ({
@@ -971,12 +1068,6 @@ const SetValuedViz = () => {
             const data = hit.userData;
             const jac = computeJacobian(data.pos.x, data.pos.y);
 
-            if (data.type === 'orbit' && data.orbitId && manifoldState.showOrbitLines) {
-                setManifoldState(prev => prev.highlightedOrbitId !== data.orbitId
-                    ? { ...prev, highlightedOrbitId: data.orbitId }
-                    : prev);
-            }
-
             setTooltip({
                 visible: true,
                 x: event.clientX,
@@ -993,13 +1084,8 @@ const SetValuedViz = () => {
             });
         } else {
             setTooltip(prev => prev.visible ? { ...prev, visible: false } : prev);
-            if (manifoldState.highlightedOrbitId !== null) {
-                setManifoldState(prev => prev.highlightedOrbitId !== null
-                    ? { ...prev, highlightedOrbitId: null }
-                    : prev);
-            }
         }
-    }, [computeJacobian, ulamState.showUlamOverlay, ulamState.gridBoxes, ulamState.invariantMeasure, ulamState.currentBoxIndex, ulamState.selectedBoxIndex, ulamState.transitions, manifoldState.showOrbitLines, manifoldState.highlightedOrbitId]);
+    }, [computeJacobian, ulamState.showUlamOverlay, ulamState.gridBoxes, ulamState.invariantMeasure, ulamState.currentBoxIndex, ulamState.selectedBoxIndex, ulamState.transitions]);
 
     const requestUlamTransitions = useCallback((index, mode = 'selected') => {
         if (index < 0) return;
@@ -1667,7 +1753,7 @@ const SetValuedViz = () => {
 
         const toRemove = [];
         scene.traverse(child => {
-            if (child.userData.type === 'trajectory' || child.userData.type === 'orbit' || child.userData.type === 'orbitLine' || child.userData.type === 'manifold' || child.userData.type === 'geometricOffset' || child.userData.type === 'basin' || child.userData.type === 'fixedPoint' || child.userData.type === 'bde') {
+            if (child.userData.type === 'trajectory' || child.userData.type === 'orbit' || child.userData.type === 'manifold' || child.userData.type === 'geometricOffset' || child.userData.type === 'basin' || child.userData.type === 'fixedPoint' || child.userData.type === 'bde') {
                 toRemove.push(child);
             }
         });
@@ -1858,18 +1944,16 @@ const SetValuedViz = () => {
 
         if (manifoldState.showOrbits && periodicState.orbits.length > 0) {
             const visibleOrbits = periodicState.orbits.filter(o => isOrbitVisible(o));
-            const HIGHLIGHT_COLOR = '#ff00ff';
 
             visibleOrbits.forEach((orbit, orbitIdx) => {
                 const orbitId = `orbit-${orbit.period}-${orbitIdx}`;
-                const isHighlighted = manifoldState.highlightedOrbitId === orbitId;
-                const pointColor = isHighlighted ? HIGHLIGHT_COLOR : getOrbitColor(orbit);
+                const pointColor = getOrbitColor(orbit);
 
                 orbit.points.forEach((pt, ptIdx) => {
-                    const geom = new THREE.SphereGeometry(isHighlighted ? 0.04 : 0.02, 10, 10);
+                    const geom = new THREE.SphereGeometry(0.02, 10, 10);
                     const mat = new THREE.MeshBasicMaterial({ color: new THREE.Color(pointColor) });
                     const sphere = new THREE.Mesh(geom, mat);
-                    sphere.position.set(pt[0], pt[1], isHighlighted ? 0.15 : 0.05);
+                    sphere.position.set(pt[0], pt[1], 0.05);
                     sphere.userData = {
                         type: 'orbit',
                         orbitId: orbitId,
@@ -1882,24 +1966,6 @@ const SetValuedViz = () => {
                     };
                     scene.add(sphere);
                 });
-
-                if (manifoldState.showOrbitLines && orbit.points.length > 1) {
-                    const pointColor = isHighlighted ? HIGHLIGHT_COLOR : getOrbitColor(orbit);
-                    const opacity = isHighlighted ? 1.0 : 0.6;
-
-                    orbit.points.forEach((pt) => {
-                        const geom = new THREE.SphereGeometry(isHighlighted ? 0.035 : 0.018, 8, 8);
-                        const mat = new THREE.MeshBasicMaterial({
-                            color: new THREE.Color(pointColor),
-                            transparent: true,
-                            opacity: opacity
-                        });
-                        const sphere = new THREE.Mesh(geom, mat);
-                        sphere.position.set(pt[0], pt[1], isHighlighted ? 0.14 : 0.04);
-                        sphere.userData = { type: 'orbitLine', orbitId: orbitId };
-                        scene.add(sphere);
-                    });
-                }
             });
         }
     }, [periodicState, manifoldState, geometricOffsetState, basinState, filters, bdeState, dynamicSystem, type, viewRange]);
@@ -2518,10 +2584,11 @@ const SetValuedViz = () => {
                 geometricOffsetState={geometricOffsetState}
                 basinState={basinState}
                 ulamState={ulamState}
+                displayRange={viewportRange}
                 savePNG={savePNG}
-                handleZoomIn={() => { }}
-                handleZoomOut={() => { }}
-                handleResetView={() => { }}
+                handleZoomIn={handleZoomIn}
+                handleZoomOut={handleZoomOut}
+                handleResetView={resetViewportRange}
                 handlePanMode={() => { }}
             />
         </Shell>

@@ -1,4 +1,7 @@
 export const RANGE_LIMIT = 10;
+export const MIN_VIEW_SPAN = 0.05;
+export const ZOOM_IN_FACTOR = 0.8;
+export const ZOOM_OUT_FACTOR = 1.25;
 
 export const DEFAULT_VIEW_RANGE = {
   xMin: -2,
@@ -38,4 +41,38 @@ export const normalizeViewRange = (range, limit = RANGE_LIMIT) => {
   }
 
   return { xMin: loX, xMax: hiX, yMin: loY, yMax: hiY };
+};
+
+const zoomAxis = (min, max, factor, limit, minSpan) => {
+  const center = (min + max) / 2;
+  const span = clamp((max - min) * factor, minSpan, limit * 2);
+  let low = center - span / 2;
+  let high = center + span / 2;
+
+  if (low < -limit) {
+    high += -limit - low;
+    low = -limit;
+  }
+  if (high > limit) {
+    low -= high - limit;
+    high = limit;
+  }
+
+  return [clamp(low, -limit, limit), clamp(high, -limit, limit)];
+};
+
+export const zoomViewRange = (
+  range,
+  factor,
+  limit = RANGE_LIMIT,
+  minSpan = MIN_VIEW_SPAN
+) => {
+  if (!Number.isFinite(factor) || factor <= 0) {
+    return normalizeViewRange(range, limit);
+  }
+
+  const normalized = normalizeViewRange(range, limit);
+  const [xMin, xMax] = zoomAxis(normalized.xMin, normalized.xMax, factor, limit, minSpan);
+  const [yMin, yMax] = zoomAxis(normalized.yMin, normalized.yMax, factor, limit, minSpan);
+  return { xMin, xMax, yMin, yMax };
 };

@@ -35,7 +35,7 @@ export const BasinApproximationPanel = ({ state, setState, canCompute, targetPoi
           <div className="basin-status-title">Basin computation complete</div>
           <div className="basin-status-copy">
             {result.trapping_verified
-              ? 'The dark-blue region is verified. The pale-blue edge records numerical uncertainty.'
+              ? 'The yellow region is verified. The pale-yellow edge records numerical uncertainty.'
               : 'This grid gives an outer estimate only because a trapping core was not verified.'}
           </div>
           <div className="basin-result-summary">

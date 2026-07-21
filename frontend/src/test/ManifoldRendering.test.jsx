@@ -322,7 +322,6 @@ describe('Tab Switch State Cleanup', () => {
       showUnstableManifold: true,
       showStableManifold: true,
       showOrbits: true,
-      showOrbitLines: true,
       showTrail: false,
       trajectoryPoints: [{ x: 1, y: 2 }],
       manifolds: [{ id: 1 }],
@@ -343,7 +342,6 @@ describe('Tab Switch State Cleanup', () => {
       showUnstableManifold: false,
       showStableManifold: false,
       showOrbits: true,
-      showOrbitLines: false,
       showTrail: true,
     };
 

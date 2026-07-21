@@ -1,5 +1,5 @@
 import React from 'react';
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import { Viewport } from './Viewport';
 
@@ -15,6 +15,7 @@ const baseProps = {
   geometricOffsetState: { showContours: false },
   basinState: { showBasin: false },
   ulamState: { showUlamOverlay: false },
+  displayRange: { xMin: -2, xMax: 2, yMin: -1.5, yMax: 1.5 },
   handleZoomIn: vi.fn(),
   handleZoomOut: vi.fn(),
   handleResetView: vi.fn(),
@@ -23,6 +24,26 @@ const baseProps = {
 };
 
 describe('Viewport', () => {
+  it('exposes the visual range independently from computation controls', () => {
+    const { container } = render(<Viewport {...baseProps} />);
+    expect(container.querySelector('.viewport')).toHaveAttribute('data-view-range', '-2,2,-1.5,1.5');
+  });
+
+  it('invokes the viewport range controls', () => {
+    const handleZoomIn = vi.fn();
+    const handleZoomOut = vi.fn();
+    const handleResetView = vi.fn();
+    render(<Viewport {...baseProps} handleZoomIn={handleZoomIn} handleZoomOut={handleZoomOut} handleResetView={handleResetView} />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Zoom in' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Zoom out' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Reset view' }));
+
+    expect(handleZoomIn).toHaveBeenCalledOnce();
+    expect(handleZoomOut).toHaveBeenCalledOnce();
+    expect(handleResetView).toHaveBeenCalledOnce();
+  });
+
   it('shows the start point tool for continuous systems', () => {
     render(<Viewport {...baseProps} type="continuous" />);
     expect(screen.getByTitle('Place start point')).toBeInTheDocument();

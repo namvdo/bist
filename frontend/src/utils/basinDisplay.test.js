@@ -2,9 +2,11 @@ import { describe, expect, it } from 'vitest';
 import { BASIN_COMPUTE_DEFAULTS, BASIN_LAYER_STYLES } from './basinDisplay';
 
 describe('basin display styling', () => {
-  it('uses two blue tones and draws the verified core above the uncertainty band', () => {
-    expect(BASIN_LAYER_STYLES.inner.color).toBe('#2797ff');
-    expect(BASIN_LAYER_STYLES.outer.color).toBe('#78d7ff');
+  it('uses two yellow tones and draws the verified core above the uncertainty band', () => {
+    expect(BASIN_LAYER_STYLES.inner.color).toBe('#ffd400');
+    expect(BASIN_LAYER_STYLES.outer.color).toBe('#ffe56b');
+    expect(BASIN_LAYER_STYLES.inner.opacity).toBeGreaterThanOrEqual(0.9);
+    expect(BASIN_LAYER_STYLES.outer.opacity).toBeGreaterThanOrEqual(0.45);
     expect(BASIN_LAYER_STYLES.inner.z).toBeGreaterThan(BASIN_LAYER_STYLES.outer.z);
     expect(BASIN_LAYER_STYLES.inner.opacity).toBeGreaterThan(BASIN_LAYER_STYLES.outer.opacity);
   });

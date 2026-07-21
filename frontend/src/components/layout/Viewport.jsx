@@ -1,13 +1,17 @@
 import React from 'react';
 import { BASIN_LAYER_STYLES } from '../../utils/basinDisplay';
 
-export const Viewport = ({ type, canvasRef, tooltip, manifoldState, geometricOffsetState, basinState, ulamState, handleZoomIn, handleZoomOut, handleResetView, handlePanMode, savePNG }) => {
+export const Viewport = ({ type, canvasRef, tooltip, manifoldState, geometricOffsetState, basinState, ulamState, displayRange, handleZoomIn, handleZoomOut, handleResetView, handlePanMode, savePNG }) => {
+  const serializedDisplayRange = displayRange
+    ? `${displayRange.xMin},${displayRange.xMax},${displayRange.yMin},${displayRange.yMax}`
+    : undefined;
+
   return (
-    <div className="viewport">
+    <div className="viewport" data-view-range={serializedDisplayRange}>
       <div className="vp-tools">
-        <button className="vp-btn" title="Zoom in" onClick={handleZoomIn}>+</button>
-        <button className="vp-btn" title="Zoom out" onClick={handleZoomOut}>−</button>
-        <button className="vp-btn" title="Reset view" onClick={handleResetView}>⌂</button>
+        <button type="button" className="vp-btn" title="Zoom in" aria-label="Zoom in" onClick={handleZoomIn}>+</button>
+        <button type="button" className="vp-btn" title="Zoom out" aria-label="Zoom out" onClick={handleZoomOut}>−</button>
+        <button type="button" className="vp-btn" title="Reset view" aria-label="Reset view" onClick={handleResetView}>⌂</button>
         <div className="vp-sep"></div>
         {type === 'continuous' && (
           <button className="vp-btn active" title="Place start point">📍</button>

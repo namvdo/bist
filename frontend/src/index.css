@@ -609,22 +609,26 @@ body {
 
 .basin-visibility-row { margin-top: 3px; }
 .basin-visibility-row .t-row { padding: 6px 0; border-bottom: none; }
-.basin-visibility-row .t-label { color: #f2f7ff; font-size: 10.5px; font-weight: 600; }
-.basin-compute { width: 100%; margin-top: 8px; }
-.basin-note { margin-top: 7px; color: #d7e7fa; font-size: 10.5px; line-height: 1.45; }
-.basin-details { margin-top: 8px; border-top: 1px solid #34516f; color: #d7e7fa; font-size: 10px; }
-.basin-details summary { padding: 7px 0 2px; color: #e7f1ff; cursor: pointer; user-select: none; }
+.basin-visibility-row .t-label { color: #ffffff; font-size: 10.5px; font-weight: 600; }
+.basin-visibility-row .t-switch.on .t-track { background: #ffd400; border-color: #ffd400; }
+.basin-visibility-row .t-switch.on .t-thumb { background: #181511; }
+.basin-visibility-row .t-switch:has(input:focus-visible) .t-track { outline-color: #ffd400; }
+.basin-compute { width: 100%; margin-top: 8px; border-color: #806b00; background: rgba(255,212,0,.11); color: #ffd400; }
+.basin-compute:hover:not(:disabled) { border-color: #ffd400; background: rgba(255,212,0,.18); }
+.basin-note { margin-top: 7px; color: #ffffff; font-size: 10.5px; line-height: 1.45; }
+.basin-details { margin-top: 8px; border-top: 1px solid #75611f; color: #ffffff; font-size: 10px; }
+.basin-details summary { padding: 7px 0 2px; color: #ffffff; cursor: pointer; user-select: none; }
 .basin-details summary:hover { color: #ffffff; }
-.basin-status { margin-top: 8px; padding: 8px; border: 1px solid #41688f; border-radius: 4px; background: #111d2d; color: #eef6ff; font-size: 10.5px; line-height: 1.4; }
-.basin-status.ready { border-color: #278ed8; color: #eef8ff; }
-.basin-status.limited { border-color: #5b8fb8; color: #eef6ff; }
+.basin-status { margin-top: 8px; padding: 8px; border: 1px solid #b8904a; border-radius: 4px; background: #27210f; color: #ffffff; font-size: 10.5px; line-height: 1.4; }
+.basin-status.ready { border-color: #ffd400; color: #ffffff; }
+.basin-status.limited { border-color: #c5a847; color: #ffffff; }
 .basin-status.error { border-color: #b75050; background: #2a1518; color: #ffdada; }
 .basin-status-title { color: #ffffff; font-weight: 700; }
-.basin-status-copy { margin-top: 3px; color: #d9eaff; }
-.basin-result-summary { display: flex; flex-wrap: wrap; gap: 3px 10px; margin-top: 6px; color: #f4f8ff; font-family: var(--font-mono); }
+.basin-status-copy { margin-top: 3px; color: #ffffff; }
+.basin-result-summary { display: flex; flex-wrap: wrap; gap: 3px 10px; margin-top: 6px; color: #ffffff; font-family: var(--font-mono); }
 .basin-diagnostics { margin-top: 5px; border-top-color: color-mix(in srgb, currentColor 22%, transparent); }
-.basin-diagnostics summary { color: #d7e7fa; }
-.basin-metrics { display: grid; gap: 2px; margin-top: 5px; color: #d7e7fa; font-family: var(--font-mono); }
+.basin-diagnostics summary { color: #ffffff; }
+.basin-metrics { display: grid; gap: 2px; margin-top: 5px; color: #ffffff; font-family: var(--font-mono); }
 .lg-box { width: 10px; height: 8px; flex-shrink: 0; opacity: 0.75; }
 
 /* ─── Controls bar (bottom of sidebar) ─────────────── */

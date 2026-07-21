@@ -1,13 +1,13 @@
 export const BASIN_LAYER_STYLES = Object.freeze({
   inner: Object.freeze({
-    color: '#2797ff',
-    opacity: 0.78,
+    color: '#ffd400',
+    opacity: 0.92,
     z: 0.05,
     renderOrder: -20
   }),
   outer: Object.freeze({
-    color: '#78d7ff',
-    opacity: 0.3,
+    color: '#ffe56b',
+    opacity: 0.48,
     z: 0.04,
     renderOrder: -30
   })

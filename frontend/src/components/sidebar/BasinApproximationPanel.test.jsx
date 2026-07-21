@@ -20,7 +20,7 @@ describe('BasinApproximationPanel', () => {
 
   it('keeps the common workflow compact and runs the computation', () => {
     const compute = vi.fn();
-    render(<BasinApproximationPanel state={state} setState={vi.fn()} canCompute targetPointCount={320} compute={compute} />);
+    const { container } = render(<BasinApproximationPanel state={state} setState={vi.fn()} canCompute targetPointCount={320} compute={compute} />);
     fireEvent.click(screen.getByRole('button', { name: /Compute basin/ }));
     expect(compute).toHaveBeenCalledOnce();
     expect(screen.getByText(/320 MIS boundary samples/)).toBeInTheDocument();
@@ -29,6 +29,7 @@ describe('BasinApproximationPanel', () => {
     expect(screen.queryByText('Advanced numerical settings')).not.toBeInTheDocument();
     expect(screen.queryByLabelText(/Certified/)).not.toBeInTheDocument();
     expect(screen.queryByLabelText(/Possible/)).not.toBeInTheDocument();
+    expect(container.querySelector('.t-swatch-line')).toHaveStyle({ background: '#ffd400' });
   });
 
   it('reports graph and certification diagnostics', () => {
@@ -60,6 +61,8 @@ describe('BasinApproximationPanel', () => {
     expect(screen.getByText(/inverse frontiers 175/)).toBeInTheDocument();
     expect(screen.getByText(/graph edges 2,300/)).toBeInTheDocument();
     expect(screen.getByText(/stored runs 420/)).toBeInTheDocument();
+    expect(screen.getByText(/yellow region is verified/)).toBeInTheDocument();
+    expect(screen.queryByText(/blue region/)).not.toBeInTheDocument();
     expect(container.querySelector('.basin-status')).toHaveClass('ready');
   });
 

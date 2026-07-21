@@ -43,11 +43,6 @@ export const PeriodicOrbitsPanel = ({
         onChange={v => setManifoldState(prev => ({ ...prev, showOrbits: v }))}
       />
       <Toggle
-        label="Orbit lines"
-        checked={manifoldState.showOrbitLines}
-        onChange={v => setManifoldState(prev => ({ ...prev, showOrbitLines: v }))}
-      />
-      <Toggle
         label="Trajectory trail"
         checked={manifoldState.showTrail}
         onChange={v => setManifoldState(prev => ({ ...prev, showTrail: v }))}
