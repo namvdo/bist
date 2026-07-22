@@ -1016,13 +1016,6 @@ kbd {
   grid-column: 1 / span 2;
 }
 
-.periodic-search-hint {
-  font-size: 10.5px;
-  color: var(--text-2);
-  margin-top: 6px;
-  line-height: 1.45;
-}
-
 /* ulam box info */
 .ulam-info {
   background: var(--surface);

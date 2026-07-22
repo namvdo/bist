@@ -4,7 +4,7 @@
 //! The independent state is `(x, y, theta)`, where
 //! `n = (cos(theta), sin(theta))` is the unit boundary normal.
 //!
-//! 1. validate parameters and lifted MIS samples;
+//! 1. validate parameters and MIS boundary states (position plus normal direction);
 //! 2. verify the target tube using outward-rounded forward enclosures;
 //! 3. discover predecessor candidates through inverse frontier enclosures;
 //! 4. cache each reached forward row as exact merged successor runs;
@@ -23,6 +23,9 @@ use wasm_bindgen::prelude::*;
 
 const UNREACHED: i32 = -1;
 const MAX_GRID_CELLS: usize = 2_000_000;
+/// Fail-safe for pathological finite-grid searches. Production searches stop
+/// earlier as soon as neither the inner nor outer predecessor set grows.
+const MAX_AUTOMATIC_EXPANSION_LEVELS: usize = 512;
 const NORMAL_EPSILON: f64 = 1e-14;
 // Split every source cell before interval evaluation.  The union still covers
 // the complete source cell, but avoids the severe dependency inflation of one
@@ -63,7 +66,6 @@ pub struct BasinApproximationConfig {
     pub grid_theta: usize,
     pub target_position_radius: f64,
     pub target_angle_radius: f64,
-    pub max_levels: usize,
 }
 
 impl BasinApproximationConfig {
@@ -103,9 +105,6 @@ impl BasinApproximationConfig {
         {
             return Err("Target angle radius must lie in the interval (0, π]".to_string());
         }
-        if self.max_levels == 0 {
-            return Err("At least one basin expansion level is required".to_string());
-        }
         Ok(())
     }
 }
@@ -124,11 +123,11 @@ impl BasinTargetPoint {
             .iter()
             .all(|value| value.is_finite())
         {
-            return Err("Lifted MIS target points must be finite".to_string());
+            return Err("MIS boundary samples and normal directions must be finite".to_string());
         }
         let normal_length = self.nx.hypot(self.ny);
         if normal_length < 1e-12 {
-            return Err("Lifted MIS target contains a zero normal".to_string());
+            return Err("An MIS boundary sample contains a zero normal direction".to_string());
         }
         Ok(Self {
             x: self.x,
@@ -149,7 +148,7 @@ pub enum BasinStopReason {
     FixedPointReached,
     ResolutionLimited,
     DomainTruncated,
-    IterationLimit,
+    ResourceLimit,
     NoTrappingCore,
 }
 
@@ -197,6 +196,10 @@ pub struct BasinApproximationResult {
     /// Number of captured destination boxes expanded through the inverse map.
     pub inverse_frontier_cell_count: usize,
     pub trapping_verified: bool,
+    /// True only when another predecessor expansion cannot add a new box.
+    pub converged: bool,
+    /// Private fail-safe used by the automatic fixed-point search.
+    pub expansion_limit: usize,
     pub stop_reason: BasinStopReason,
 
     /// Angularly averaged position-plane areas.  These are not probabilities.
@@ -1354,7 +1357,7 @@ fn trapping_core_sparse(
 fn expand_inner(
     graph: &TransitionGraph,
     seed: &[bool],
-    max_levels: usize,
+    expansion_limit: usize,
 ) -> (Vec<i32>, usize, bool) {
     let node_count = seed.len();
     let mut levels = vec![UNREACHED; node_count];
@@ -1370,7 +1373,7 @@ fn expand_inner(
     }
 
     let mut completed = 0;
-    for level in 1..=max_levels {
+    for level in 1..=expansion_limit {
         if frontier.is_empty() {
             break;
         }
@@ -1412,7 +1415,11 @@ fn expand_inner(
 }
 
 #[cfg(test)]
-fn expand_outer(reverse: &CsrGraph, seed: &[bool], max_levels: usize) -> (Vec<i32>, usize, bool) {
+fn expand_outer(
+    reverse: &CsrGraph,
+    seed: &[bool],
+    expansion_limit: usize,
+) -> (Vec<i32>, usize, bool) {
     let mut levels = vec![UNREACHED; seed.len()];
     let mut frontier = Vec::new();
     for (node, &is_seed) in seed.iter().enumerate() {
@@ -1422,7 +1429,7 @@ fn expand_outer(reverse: &CsrGraph, seed: &[bool], max_levels: usize) -> (Vec<i3
         }
     }
     let mut completed = 0;
-    for level in 1..=max_levels {
+    for level in 1..=expansion_limit {
         if frontier.is_empty() {
             break;
         }
@@ -1468,7 +1475,11 @@ fn expand_lazy_predecessors(
     graph: &mut SparseTransitionGraph,
     inner_seed: &[bool],
     outer_seed: &[bool],
+    expansion_limit: usize,
 ) -> Result<LazyExpansionResult, String> {
+    if expansion_limit == 0 {
+        return Err("The internal basin expansion limit must be positive".to_string());
+    }
     let node_count = grid.cell_count();
     let mut inner_levels = vec![UNREACHED; node_count];
     let mut outer_levels = vec![UNREACHED; node_count];
@@ -1490,7 +1501,7 @@ fn expand_lazy_predecessors(
     let mut completed_inner_levels = 0usize;
     let mut completed_outer_levels = 0usize;
 
-    for level in 1..=config.max_levels {
+    for level in 1..=expansion_limit {
         let mut possible_sources = HashSet::new();
         for &destination in &outer_frontier {
             if !inverse_expanded[destination] {
@@ -1644,13 +1655,36 @@ fn project_levels(
     projection
 }
 
+fn classify_stop_reason(
+    converged: bool,
+    trapping_verified: bool,
+    boundary_contact: bool,
+    reachable_domain_exit: bool,
+    inverse_left_domain: bool,
+    has_unresolved_cells: bool,
+) -> BasinStopReason {
+    if !converged {
+        BasinStopReason::ResourceLimit
+    } else if !trapping_verified {
+        BasinStopReason::NoTrappingCore
+    } else if boundary_contact || reachable_domain_exit || inverse_left_domain {
+        BasinStopReason::DomainTruncated
+    } else if has_unresolved_cells {
+        BasinStopReason::ResolutionLimited
+    } else {
+        BasinStopReason::FixedPointReached
+    }
+}
+
 pub fn compute_henon_extended_basin(
     target_points: &[BasinTargetPoint],
     config: &BasinApproximationConfig,
 ) -> Result<BasinApproximationResult, String> {
     config.validate()?;
     if target_points.is_empty() {
-        return Err("At least one lifted MIS target point is required".to_string());
+        return Err(
+            "At least one MIS boundary sample with a normal direction is required".to_string(),
+        );
     }
     let targets = target_points
         .iter()
@@ -1678,7 +1712,14 @@ pub fn compute_henon_extended_basin(
     // requested MIS tube itself as the outer seed and return an honest
     // amber-only approximation instead of aborting the whole computation.
     let outer_seed = if trapping_verified { &seed } else { &candidate };
-    let expansion = expand_lazy_predecessors(&grid, config, &mut graph, &seed, outer_seed)?;
+    let expansion = expand_lazy_predecessors(
+        &grid,
+        config,
+        &mut graph,
+        &seed,
+        outer_seed,
+        MAX_AUTOMATIC_EXPANSION_LEVELS,
+    )?;
     let LazyExpansionResult {
         inner_levels,
         outer_levels,
@@ -1725,17 +1766,15 @@ pub fn compute_henon_extended_basin(
         .map(|cell| cell.outer_coverage * cell_area)
         .sum();
     let unresolved_area = (outer_area - inner_area).max(0.0);
-    let stop_reason = if !trapping_verified {
-        BasinStopReason::NoTrappingCore
-    } else if inner_can_grow || outer_can_grow {
-        BasinStopReason::IterationLimit
-    } else if boundary_contact_cell_count > 0 || reachable_domain_exit || inverse_left_domain {
-        BasinStopReason::DomainTruncated
-    } else if unresolved_cell_count > 0 {
-        BasinStopReason::ResolutionLimited
-    } else {
-        BasinStopReason::FixedPointReached
-    };
+    let converged = !(inner_can_grow || outer_can_grow);
+    let stop_reason = classify_stop_reason(
+        converged,
+        trapping_verified,
+        boundary_contact_cell_count > 0,
+        reachable_domain_exit,
+        inverse_left_domain,
+        unresolved_cell_count > 0,
+    );
 
     Ok(BasinApproximationResult {
         grid_x: grid.nx,
@@ -1760,6 +1799,8 @@ pub fn compute_henon_extended_basin(
         evaluated_cell_count: graph.rows.len(),
         inverse_frontier_cell_count,
         trapping_verified,
+        converged,
+        expansion_limit: MAX_AUTOMATIC_EXPANSION_LEVELS,
         stop_reason,
         inner_area,
         outer_area,
@@ -1773,7 +1814,7 @@ pub fn compute_henon_extended_basin_js(
     config: JsValue,
 ) -> Result<JsValue, JsValue> {
     let target_points: Vec<BasinTargetPoint> = serde_wasm_bindgen::from_value(target_points)
-        .map_err(|error| JsValue::from_str(&format!("Invalid lifted MIS target: {error}")))?;
+        .map_err(|error| JsValue::from_str(&format!("Invalid MIS boundary data: {error}")))?;
     let config: BasinApproximationConfig = serde_wasm_bindgen::from_value(config)
         .map_err(|error| JsValue::from_str(&format!("Invalid basin configuration: {error}")))?;
     let result = compute_henon_extended_basin(&target_points, &config)
@@ -1802,7 +1843,6 @@ mod tests {
             grid_theta: 16,
             target_position_radius: 0.25,
             target_angle_radius: 0.5,
-            max_levels: 8,
         }
     }
 
@@ -1820,6 +1860,18 @@ mod tests {
         invalid = config();
         invalid.grid_theta = 4;
         assert!(invalid.validate().is_err());
+    }
+
+    #[test]
+    fn unfinished_automatic_expansion_reports_the_internal_resource_limit() {
+        assert_eq!(
+            classify_stop_reason(false, false, false, false, false, false),
+            BasinStopReason::ResourceLimit
+        );
+        assert_eq!(
+            classify_stop_reason(true, false, false, false, false, true),
+            BasinStopReason::NoTrappingCore
+        );
     }
 
     #[test]
@@ -1948,8 +2000,7 @@ mod tests {
 
     #[test]
     fn lazy_inverse_frontier_evaluates_only_discovered_sources() {
-        let mut configuration = config();
-        configuration.max_levels = 1;
+        let configuration = config();
         let grid = Grid3::new(&configuration);
         let seed_id = grid.id(4, 4, 8);
         let mut inner_seed = vec![false; grid.cell_count()];
@@ -1959,9 +2010,15 @@ mod tests {
         let mut graph = SparseTransitionGraph::default();
         ensure_forward_row(&mut graph, &grid, seed_id, &configuration).unwrap();
 
-        let result =
-            expand_lazy_predecessors(&grid, &configuration, &mut graph, &inner_seed, &outer_seed)
-                .unwrap();
+        let result = expand_lazy_predecessors(
+            &grid,
+            &configuration,
+            &mut graph,
+            &inner_seed,
+            &outer_seed,
+            1,
+        )
+        .unwrap();
 
         assert!(result.inverse_frontier_cell_count >= 1);
         assert!(graph.rows.len() < grid.cell_count());
@@ -1970,22 +2027,28 @@ mod tests {
 
     #[test]
     fn lazy_inverse_frontier_respects_eager_level_semantics() {
-        let mut configuration = config();
-        configuration.max_levels = 2;
+        let configuration = config();
+        let expansion_limit = 2;
         let grid = Grid3::new(&configuration);
         let seed_id = grid.id(4, 4, 8);
         let mut seed = vec![false; grid.cell_count()];
         seed[seed_id] = true;
 
         let eager_graph = build_transition_graph(&grid, &configuration).unwrap();
-        let (eager_inner, _, _) = expand_inner(&eager_graph, &seed, configuration.max_levels);
-        let (eager_outer, _, _) =
-            expand_outer(&eager_graph.reverse, &seed, configuration.max_levels);
+        let (eager_inner, _, _) = expand_inner(&eager_graph, &seed, expansion_limit);
+        let (eager_outer, _, _) = expand_outer(&eager_graph.reverse, &seed, expansion_limit);
 
         let mut lazy_graph = SparseTransitionGraph::default();
         ensure_forward_row(&mut lazy_graph, &grid, seed_id, &configuration).unwrap();
-        let lazy =
-            expand_lazy_predecessors(&grid, &configuration, &mut lazy_graph, &seed, &seed).unwrap();
+        let lazy = expand_lazy_predecessors(
+            &grid,
+            &configuration,
+            &mut lazy_graph,
+            &seed,
+            &seed,
+            expansion_limit,
+        )
+        .unwrap();
 
         assert_eq!(lazy.inner_levels, eager_inner);
         for (cell, &lazy_level) in lazy.outer_levels.iter().enumerate() {
@@ -2021,7 +2084,6 @@ mod tests {
         configuration.grid_theta = 8;
         configuration.target_position_radius = 0.6;
         configuration.target_angle_radius = 1.5;
-        configuration.max_levels = 3;
         let targets = [
             BasinTargetPoint {
                 x: 0.676,
@@ -2137,7 +2199,6 @@ mod tests {
             grid_theta: 8,
             target_position_radius: 100.0,
             target_angle_radius: PI,
-            max_levels: 4,
         };
         let result = compute_henon_extended_basin(
             &[BasinTargetPoint {
@@ -2150,6 +2211,8 @@ mod tests {
         )
         .unwrap();
         assert!(result.trapping_verified);
+        assert!(result.converged);
+        assert_eq!(result.expansion_limit, MAX_AUTOMATIC_EXPANSION_LEVELS);
         assert_eq!(
             result.target_cell_count,
             configuration.grid_x * configuration.grid_y * configuration.grid_theta
@@ -2164,7 +2227,6 @@ mod tests {
         let mut configuration = config();
         configuration.target_position_radius = 0.8;
         configuration.target_angle_radius = 1.0;
-        configuration.max_levels = 3;
         let result = compute_henon_extended_basin(
             &[BasinTargetPoint {
                 x: 0.0,
@@ -2181,6 +2243,7 @@ mod tests {
         assert_eq!(result.target_cell_count, 0);
         assert_eq!(result.inner_cell_count, 0);
         assert!(result.outer_cell_count >= result.candidate_target_cell_count);
+        assert!(result.converged);
         assert_eq!(result.stop_reason, BasinStopReason::NoTrappingCore);
         assert!(result.inverse_frontier_cell_count > 0);
         assert!(

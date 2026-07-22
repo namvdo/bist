@@ -40,9 +40,11 @@ describe('PeriodicSearchPanel', () => {
     expect(onUpdate).toHaveBeenCalledWith({ useContinuation: true });
   });
 
-  it('shows which periodic computation method produced the current result', () => {
+  it('keeps continuation compact without the explanatory paragraph', () => {
     render(<PeriodicSearchPanel {...baseProps} periodicState={{ computeMethod: 'continuation' }} />);
-    expect(screen.getByText(/Last run used continuation/)).toBeInTheDocument();
+    expect(screen.getByText('Use continuation')).toBeInTheDocument();
+    expect(screen.queryByText(/Last run used continuation/)).toBeNull();
+    expect(screen.queryByText(/Enable continuation/)).toBeNull();
   });
 
   it('is hidden for systems without boundary periodic search', () => {

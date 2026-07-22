@@ -25,6 +25,7 @@ import { buildGeometricOffsetSeed } from './utils/geometricOffsetSeed';
 import { buildBasinTarget } from './utils/basinTarget';
 import { BASIN_COMPUTE_DEFAULTS, BASIN_LAYER_STYLES } from './utils/basinDisplay';
 import { describeBasinComputationError } from './utils/basinError';
+import { createCancelableWorkerTask, isAbortError } from './utils/cancelableWorkerTask';
 
 const GRID_STYLE = {
     gridDivisions: 16,
@@ -309,11 +310,11 @@ const SetValuedViz = () => {
     });
 
     const [basinState, setBasinState] = useState({
-        maxLevels: 20,
         showBasin: true,
         isComputing: false,
         result: null,
-        error: null
+        error: null,
+        notice: null
     });
 
     const geometricOffsetSeed = useMemo(
@@ -455,6 +456,8 @@ const SetValuedViz = () => {
     const computeWorkerRef = useRef(null);
     const computeWorkerRequestIdRef = useRef(0);
     const computeWorkerPendingRef = useRef(new Map());
+    const basinWorkerTaskRef = useRef(null);
+    const basinWorkerRequestIdRef = useRef(0);
     const ulamDebounceRef = useRef(null);
     const ulamSupportRef = useRef(null);
     const ulamTransitionsRequestRef = useRef(0);
@@ -517,6 +520,32 @@ const SetValuedViz = () => {
             worker.postMessage({ id: requestId, kind, payload });
         });
     }, [initComputeWorker]);
+
+    const runBasinComputeTask = useCallback((payload) => {
+        if (basinWorkerTaskRef.current) {
+            throw new Error('A basin computation is already running');
+        }
+        const worker = new Worker(
+            new URL('./compute.worker.js', import.meta.url),
+            { type: 'module' }
+        );
+        const task = createCancelableWorkerTask({
+            worker,
+            id: ++basinWorkerRequestIdRef.current,
+            kind: 'computeExtendedBasin',
+            payload
+        });
+        basinWorkerTaskRef.current = task;
+        return task.promise.finally(() => {
+            if (basinWorkerTaskRef.current === task) {
+                basinWorkerTaskRef.current = null;
+            }
+        });
+    }, []);
+
+    const cancelBasinComputation = useCallback(() => {
+        basinWorkerTaskRef.current?.cancel('Basin computation cancelled before convergence.');
+    }, []);
 
     const updatePeriodicSearchSettings = useCallback((patch) => {
         setDraftPeriodicSearchSettings(prev => normalizePeriodicSearchSettings({ ...prev, ...patch }, prev));
@@ -731,6 +760,8 @@ const SetValuedViz = () => {
                 computeWorkerRef.current.terminate();
                 computeWorkerRef.current = null;
             }
+            basinWorkerTaskRef.current?.cancel('Basin computation cancelled because the application closed.');
+            basinWorkerTaskRef.current = null;
         };
     }, []);
 
@@ -1696,13 +1727,19 @@ const SetValuedViz = () => {
         if (dynamicSystem !== 'henon' || basinTarget.length < 3) {
             setBasinState(previous => ({
                 ...previous,
-                error: 'A closed lifted MIS boundary with valid normals is required.'
+                error: 'A closed MIS boundary with valid normal directions is required.'
             }));
             return;
         }
-        setBasinState(previous => ({ ...previous, isComputing: true, error: null }));
+        setBasinState(previous => ({
+            ...previous,
+            isComputing: true,
+            result: null,
+            error: null,
+            notice: null
+        }));
         try {
-            const result = await runComputeTask('computeExtendedBasin', {
+            const result = await runBasinComputeTask({
                 targetPoints: basinTarget,
                 config: {
                     a: params.a,
@@ -1718,33 +1755,42 @@ const SetValuedViz = () => {
                     grid_y: BASIN_COMPUTE_DEFAULTS.gridXY,
                     grid_theta: BASIN_COMPUTE_DEFAULTS.gridTheta,
                     target_position_radius: BASIN_COMPUTE_DEFAULTS.targetPositionRadius,
-                    target_angle_radius: BASIN_COMPUTE_DEFAULTS.targetAngleRadius,
-                    max_levels: basinState.maxLevels
+                    target_angle_radius: BASIN_COMPUTE_DEFAULTS.targetAngleRadius
                 }
             });
-            setBasinState(previous => ({ ...previous, isComputing: false, result, error: null }));
+            setBasinState(previous => ({ ...previous, isComputing: false, result, error: null, notice: null }));
         } catch (error) {
+            if (isAbortError(error)) {
+                setBasinState(previous => ({
+                    ...previous,
+                    isComputing: false,
+                    notice: error.message,
+                    error: null
+                }));
+                return;
+            }
             setBasinState(previous => ({
                 ...previous,
                 isComputing: false,
                 result: null,
+                notice: null,
                 error: describeBasinComputationError(error)
             }));
         }
     }, [
-        basinState.maxLevels,
         basinTarget,
         dynamicSystem,
         params.a,
         params.b,
         params.epsilon,
-        runComputeTask,
+        runBasinComputeTask,
         viewRange
     ]);
 
     useEffect(() => {
         setGeometricOffsetState(prev => ({ ...prev, result: null, error: null }));
-        setBasinState(prev => ({ ...prev, result: null, error: null }));
+        basinWorkerTaskRef.current?.cancel('Basin computation cancelled because its inputs changed.');
+        setBasinState(prev => ({ ...prev, result: null, error: null, notice: null }));
     }, [params.a, params.b, params.epsilon, manifoldState.manifolds, viewRange]);
 
     useEffect(() => {
@@ -2551,6 +2597,7 @@ const SetValuedViz = () => {
                 canComputeBasin={!manifoldState.isComputing && !basinState.isComputing && basinTarget.length >= 3}
                 basinTargetPointCount={basinTarget.length}
                 computeBasin={computeBasin}
+                cancelBasinComputation={cancelBasinComputation}
                 ORBIT_COLORS={ORBIT_COLORS}
                 filters={filters}
                 setFilters={setFilters}

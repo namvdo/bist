@@ -95,6 +95,7 @@ export const Sidebar = (props) => {
                   canCompute={props.canComputeBasin}
                   targetPointCount={props.basinTargetPointCount}
                   compute={props.computeBasin}
+                  cancel={props.cancelBasinComputation}
                 />
               </>
             )}

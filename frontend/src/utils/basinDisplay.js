@@ -13,9 +13,8 @@ export const BASIN_LAYER_STYLES = Object.freeze({
   })
 });
 
-// These defaults give a useful first computation without exposing implementation
-// parameters in the everyday UI. Search depth remains user-controlled because it
-// changes how far the inverse frontier is expanded.
+// These defaults give a useful automatic fixed-point computation without
+// exposing implementation parameters in the everyday UI.
 export const BASIN_COMPUTE_DEFAULTS = Object.freeze({
   gridXY: 40,
   gridTheta: 24,

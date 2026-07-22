@@ -40,7 +40,7 @@ const deriveExtendedBoundary = (boundary) => {
 };
 
 /**
- * Select a closed lifted MIS curve for the deterministic extended map.
+ * Select a closed MIS unit-normal-bundle curve for the deterministic extended map.
  * Actual manifold normals are preferred; geometric curve normals are a
  * deterministic fallback when an older manifold result has positions only.
  */

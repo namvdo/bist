@@ -23,10 +23,10 @@ const result = {
 };
 
 describe('GeometricOffsetsPanel', () => {
-  it('disables computation until an MIS boundary seed exists', () => {
-    render(<GeometricOffsetsPanel state={state} setState={vi.fn()} canCompute={false} compute={vi.fn()} />);
+  it('disables computation without showing prerequisite instructions', () => {
+    const { container } = render(<GeometricOffsetsPanel state={state} setState={vi.fn()} canCompute={false} compute={vi.fn()} />);
     expect(screen.getByRole('button', { name: /Compute exact ε-offset/ })).toBeDisabled();
-    expect(screen.getByText(/closed unstable-manifold boundary/)).toBeInTheDocument();
+    expect(container.querySelector('.geometric-offset-note')).toBeNull();
   });
 
   it('runs geometric offset computation', () => {

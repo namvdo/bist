@@ -18,8 +18,6 @@ export const GeometricOffsetsPanel = ({ state, setState, canCompute, compute }) 
         disabled={!canCompute || state.isComputing}>
         {state.isComputing ? 'Computing geometric offsets…' : 'Compute exact ε-offset contours'}
       </button>
-      {!canCompute && <div className="geometric-offset-note">Waiting for a closed unstable-manifold boundary.</div>}
-      <div className="geometric-offset-note">Each contour is the signed-distance level kε from the MIS seed. Widen the current view if a requested contour reaches its edge.</div>
       {state.error && <div className="geometric-offset-status error" role="alert">{state.error}</div>}
       {result && !state.error && (
         <div aria-live="polite" className={`geometric-offset-status ${result.stop_reason === 'requested_levels_completed' ? 'ready' : 'warning'}`}>

@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { buildBasinTarget, deriveExtendedBoundary } from './basinTarget';
 
 describe('basinTarget', () => {
-  it('preserves and normalizes lifted manifold normals', () => {
+  it('preserves and normalizes MIS boundary normal directions', () => {
     const points = [
       [0, 0, 2, 0],
       [1, 0, 0, -3],
@@ -20,7 +20,7 @@ describe('basinTarget', () => {
     target.forEach(point => expect(Math.hypot(point.nx, point.ny)).toBeCloseTo(1, 12));
   });
 
-  it('completes a negative-multiplier lifted phase through the deterministic map', () => {
+  it('completes a negative-multiplier boundary-state phase through the deterministic map', () => {
     const params = { a: 0.4, b: 0.3, epsilon: 0.1 };
     const extended = [
       [1, 0, 1, 0],

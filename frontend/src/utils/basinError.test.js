@@ -6,7 +6,7 @@ describe('describeBasinComputationError', () => {
     expect(describeBasinComputationError(new WebAssembly.RuntimeError('unreachable')))
       .toMatch(/WebAssembly resources/);
     expect(describeBasinComputationError(new Error('memory access out of bounds')))
-      .toMatch(/reduce the search depth/i);
+      .toMatch(/before convergence/i);
   });
 
   it('preserves meaningful backend validation errors', () => {
