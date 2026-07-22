@@ -25,6 +25,20 @@ Rather than tracking every possible point within the noise ball $B_\epsilon(f(x)
 
 ![Set-valued dynamical system with additive bounded noise Visualization](./images/unstable_manifold_for_boundary_map.png)
 
+### Geometric offset contours around the MIS
+
+After computing a closed unstable-manifold approximation of the MIS boundary, the **Geometric offsets** panel computes
+
+$$G_k=M_0\oplus\overline B_{k\epsilon},\qquad \partial G_k=\{x:\operatorname{sdist}_{M_0}(x)=k\epsilon\}.$$
+
+Thus consecutive contours have the requested set-distance gap \(\epsilon\), up to the reported numerical residual and grid uncertainty. The panel controls the number of levels, grid resolution, and contour visibility, and reports every target distance, area, component count, residual, and uncertainty. The current view is the computation domain, so widen it if a requested contour reaches the edge. See the rigorous mathematical and technical note as [LaTeX source](./docs/geometric_offset_contours.tex), [compiled PDF](./output/pdf/geometric_offset_contours.pdf), or [concise implementation note](./docs/geometric_offset_contours.md).
+
+### Deterministic extended-map basin approximation
+
+The **Basin of attraction** panel works in the extended boundary-map state space \((x,y,\theta)\), where \((x,y)\) is the boundary position and \(\theta\) specifies its unit normal direction. Interval inverse images discover predecessor candidates lazily, and a bidirectional consistency check requires every candidate's conservative forward row to reach the frontier box that generated it. Rows are stored exactly as merged row-major successor ranges. Forward verification reports a finite-capture inner set and a possible-capture outer set; their difference remains explicit uncertainty. The backend separately reports numerical target-sampling quality, forward-invariant trapping, a sufficient local contraction bound, domain containment, graph convergence, and a combined end-to-end verification flag, so finite capture is not confused with a complete attraction proof.
+
+The panel provides **Draft**, **Standard**, and **Fine** accuracy presets plus validated numerical controls for the base position grid, normal-angle grid, persistent refinement passes, and boundary-sample count. It shows the effective three-dimensional cell count before computation and rejects settings above the backend's per-axis or 2,000,000-cell guards. A separate target-enclosure group exposes the position radius and normal tolerance with a warning that these values change the target set rather than merely increasing precision. Standard mode refines a `24 x 24 x 16` base grid to a persistent `48 x 48 x 32` graph and compares its angularly averaged areas with the coarser grid. Saturated yellow records verified finite capture and pale yellow records possible/unresolved capture; the legend identifies the two meanings separately, while one visibility switch controls both. **Compute basin** still expands until no new boxes are found, becomes **Cancel basin computation** while active, and reports clearly when the private resource guard, domain, resolution, target, or contraction checks prevent a complete conclusion. See [the implementation note](./docs/basin_approximation.md), [the rigorous LaTeX note](./docs/basin_approximation.tex), and [the compiled PDF](./output/pdf/basin_approximation.pdf).
+
 ### An example of a 4-periodic point found for the boundary map with A = 1.4 and B = 0.3, epsilon=0.0625
 
 ![4-periodic point](./images/periodic_orbit_visualization.png)
@@ -56,7 +70,7 @@ cd set-valued-viz
 cd frontend && npm install && npm run build-wasm
 ```
 
-This creates the WebAssembly module in the `pkg/` directory and compiled the Rust code to WebAssembly so it can be used in JavaScript side.
+This creates the WebAssembly module in `frontend/pkg/` so the worker and UI use the current Rust implementation.
 
 ### **3. Start the frontend server**
 

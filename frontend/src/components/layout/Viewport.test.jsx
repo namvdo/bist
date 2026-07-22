@@ -53,4 +53,14 @@ describe('Viewport', () => {
     render(<Viewport {...baseProps} type="discrete" />);
     expect(screen.queryByTitle('Place start point')).toBeNull();
   });
+
+  it('separates verified finite capture from unresolved outer coverage', () => {
+    render(<Viewport {...baseProps} basinState={{
+      showBasin: true,
+      result: { inner_cell_count: 12, unresolved_cell_count: 7 }
+    }} />);
+    expect(screen.getByText('Verified finite capture')).toBeInTheDocument();
+    expect(screen.getByText('Possible / unresolved')).toBeInTheDocument();
+    expect(screen.queryByText('Basin approximation')).toBeNull();
+  });
 });

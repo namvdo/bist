@@ -26,6 +26,7 @@ const MAX_GRID_CELLS: usize = 2_000_000;
 /// Fail-safe for pathological finite-grid searches. Production searches stop
 /// earlier as soon as neither the inner nor outer predecessor set grows.
 const MAX_AUTOMATIC_EXPANSION_LEVELS: usize = 512;
+const MAX_REFINEMENT_ROUNDS: usize = 2;
 const NORMAL_EPSILON: f64 = 1e-14;
 // Split every source cell before interval evaluation.  The union still covers
 // the complete source cell, but avoids the severe dependency inflation of one
@@ -66,6 +67,11 @@ pub struct BasinApproximationConfig {
     pub grid_theta: usize,
     pub target_position_radius: f64,
     pub target_angle_radius: f64,
+    /// Number of uniform persistent-cell refinements applied before graph
+    /// construction. Each round doubles all three state axes. The UI exposes
+    /// this with an effective-cell estimate and mirrors the guards below.
+    #[serde(default)]
+    pub refinement_rounds: usize,
 }
 
 impl BasinApproximationConfig {
@@ -86,10 +92,32 @@ impl BasinApproximationConfig {
         if self.grid_x > 512 || self.grid_y > 512 || self.grid_theta > 256 {
             return Err("Requested basin grid exceeds the supported per-axis limit".to_string());
         }
-        let cells = self
+        if self.refinement_rounds > MAX_REFINEMENT_ROUNDS {
+            return Err(format!(
+                "At most {MAX_REFINEMENT_ROUNDS} automatic basin refinement rounds are supported"
+            ));
+        }
+        let refinement_factor = 1usize
+            .checked_shl(self.refinement_rounds as u32)
+            .ok_or("Basin refinement factor overflow")?;
+        let refined_x = self
             .grid_x
-            .checked_mul(self.grid_y)
-            .and_then(|value| value.checked_mul(self.grid_theta))
+            .checked_mul(refinement_factor)
+            .ok_or("Refined basin x-grid overflow")?;
+        let refined_y = self
+            .grid_y
+            .checked_mul(refinement_factor)
+            .ok_or("Refined basin y-grid overflow")?;
+        let refined_theta = self
+            .grid_theta
+            .checked_mul(refinement_factor)
+            .ok_or("Refined basin angle-grid overflow")?;
+        if refined_x > 512 || refined_y > 512 || refined_theta > 256 {
+            return Err("Refined basin grid exceeds the supported per-axis limit".to_string());
+        }
+        let cells = refined_x
+            .checked_mul(refined_y)
+            .and_then(|value| value.checked_mul(refined_theta))
             .ok_or("Basin grid size overflow")?;
         if cells > MAX_GRID_CELLS {
             return Err(format!(
@@ -150,6 +178,8 @@ pub enum BasinStopReason {
     DomainTruncated,
     ResourceLimit,
     NoTrappingCore,
+    TargetSamplingUnverified,
+    AttractionUnverified,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -166,6 +196,11 @@ pub struct BasinProjectionCell {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BasinApproximationResult {
+    /// Requested coarse grid before automatic persistent refinement.
+    pub requested_grid_x: usize,
+    pub requested_grid_y: usize,
+    pub requested_grid_theta: usize,
+    pub refinement_rounds: usize,
     pub grid_x: usize,
     pub grid_y: usize,
     pub grid_theta: usize,
@@ -195,7 +230,31 @@ pub struct BasinApproximationResult {
     pub evaluated_cell_count: usize,
     /// Number of captured destination boxes expanded through the inverse map.
     pub inverse_frontier_cell_count: usize,
+    /// Inverse candidates removed because their rigorous forward rows cannot
+    /// reach the destination frontier that generated them.
+    pub forward_consistency_rejection_count: usize,
     pub trapping_verified: bool,
+    /// Sufficient Euclidean Lipschitz bound over the retained trapping core.
+    /// A value below one proves contraction in this coordinate metric.
+    pub local_contraction_upper_bound: Option<f64>,
+    pub local_contraction_verified: bool,
+    pub target_sampling_validated: bool,
+    pub target_sample_count: usize,
+    pub target_closure_gap: f64,
+    pub target_median_spacing: f64,
+    pub target_max_spacing: f64,
+    pub target_max_normal_angle_jump: f64,
+    /// Areas from the immediately coarser persistent grid, when automatic
+    /// refinement is enabled. They provide a nested-grid sensitivity check;
+    /// they are diagnostics, not an additional proof by themselves.
+    pub previous_refinement_inner_area: Option<f64>,
+    pub previous_refinement_outer_area: Option<f64>,
+    pub refinement_inner_area_change: Option<f64>,
+    pub refinement_outer_area_change: Option<f64>,
+    pub refinement_stable: Option<bool>,
+    /// True only when the numerical target samples, trapping, contraction,
+    /// domain containment, and fixed-point expansion checks all succeeded.
+    pub end_to_end_verified: bool,
     /// True only when another predecessor expansion cannot add a new box.
     pub converged: bool,
     /// Private fail-safe used by the automatic fixed-point search.
@@ -237,6 +296,27 @@ impl Grid3 {
             dy: (config.bounds.y_max - config.bounds.y_min) / config.grid_y as f64,
             dt: TAU / config.grid_theta as f64,
         }
+    }
+
+    fn refined(config: &BasinApproximationConfig) -> Result<Self, String> {
+        let factor = 1usize
+            .checked_shl(config.refinement_rounds as u32)
+            .ok_or("Basin refinement factor overflow")?;
+        let mut refined = config.clone();
+        refined.grid_x = refined
+            .grid_x
+            .checked_mul(factor)
+            .ok_or("Refined basin x-grid overflow")?;
+        refined.grid_y = refined
+            .grid_y
+            .checked_mul(factor)
+            .ok_or("Refined basin y-grid overflow")?;
+        refined.grid_theta = refined
+            .grid_theta
+            .checked_mul(factor)
+            .ok_or("Refined basin angle-grid overflow")?;
+        refined.refinement_rounds = 0;
+        Ok(Self::new(&refined))
     }
 
     fn cell_count(&self) -> usize {
@@ -480,6 +560,7 @@ struct ImageEnclosure {
     y: Interval,
     angle_center: f64,
     angle_radius: f64,
+    derivative_frobenius_upper: f64,
 }
 
 fn normalize_angle(angle: f64) -> f64 {
@@ -653,12 +734,21 @@ fn enclose_box_image(
     let x_radius = component_radius(&image_x.derivative);
     let y_radius = component_radius(&image_y.derivative);
     let angle_radius = component_radius(&angle_derivative).min(PI);
+    let derivative_frobenius_upper = image_x
+        .derivative
+        .iter()
+        .chain(image_y.derivative.iter())
+        .chain(angle_derivative.iter())
+        .map(|derivative| derivative.max_abs().powi(2))
+        .sum::<f64>()
+        .sqrt();
 
     Ok(ImageEnclosure {
         x: Interval::from_center_radius(center_image.x, x_radius),
         y: Interval::from_center_radius(center_image.y, y_radius),
         angle_center: center_image.theta,
         angle_radius,
+        derivative_frobenius_upper: next_up(derivative_frobenius_upper),
     })
 }
 
@@ -718,11 +808,20 @@ fn enclose_box_inverse_image(
                 .sum::<f64>(),
         )
     };
+    let derivative_frobenius_upper = x
+        .derivative
+        .iter()
+        .chain(y.derivative.iter())
+        .chain(angle_derivative.iter())
+        .map(|derivative| derivative.max_abs().powi(2))
+        .sum::<f64>()
+        .sqrt();
     Ok(ImageEnclosure {
         x: Interval::from_center_radius(center_image.x, component_radius(&x.derivative)),
         y: Interval::from_center_radius(center_image.y, component_radius(&y.derivative)),
         angle_center: center_image.theta,
         angle_radius: component_radius(&angle_derivative).min(PI),
+        derivative_frobenius_upper: next_up(derivative_frobenius_upper),
     })
 }
 
@@ -899,6 +998,7 @@ struct CachedTransitionRow {
     /// coverage exact without storing one integer per edge.
     successor_runs: Vec<SuccessorRun>,
     domain_exit: bool,
+    derivative_frobenius_upper: f64,
 }
 
 impl CachedTransitionRow {
@@ -923,6 +1023,15 @@ impl CachedTransitionRow {
         self.successor_runs.iter().all(|run| {
             membership_prefix[run.end] - membership_prefix[run.start] == run.end - run.start
         })
+    }
+
+    fn contains_successor(&self, destination: usize) -> bool {
+        let insertion = self
+            .successor_runs
+            .partition_point(|run| run.end <= destination);
+        self.successor_runs
+            .get(insertion)
+            .is_some_and(|run| run.start <= destination && destination < run.end)
     }
 
     #[cfg(test)]
@@ -989,6 +1098,7 @@ fn compute_forward_row(
 ) -> Result<CachedTransitionRow, String> {
     let mut successor_runs: Vec<SuccessorRun> = Vec::new();
     let mut domain_exit = false;
+    let mut derivative_frobenius_upper = 0.0_f64;
     let tolerance = domain_tolerance(grid);
     for st in 0..ENCLOSURE_SUBDIVISIONS {
         for sy in 0..ENCLOSURE_SUBDIVISIONS {
@@ -996,6 +1106,8 @@ fn compute_forward_row(
                 let (intervals, center, half_width) =
                     subbox_geometry(grid, source, sx, sy, st, ENCLOSURE_SUBDIVISIONS);
                 let enclosure = enclose_box_image(intervals, center, half_width, config)?;
+                derivative_frobenius_upper =
+                    derivative_frobenius_upper.max(enclosure.derivative_frobenius_upper);
                 domain_exit |= enclosure.x.lo < grid.bounds.x_min - tolerance
                     || enclosure.x.hi > grid.bounds.x_max + tolerance
                     || enclosure.y.lo < grid.bounds.y_min - tolerance
@@ -1046,6 +1158,7 @@ fn compute_forward_row(
     Ok(CachedTransitionRow {
         successor_runs: merged_runs,
         domain_exit,
+        derivative_frobenius_upper,
     })
 }
 
@@ -1296,6 +1409,56 @@ fn target_candidate_cells(
     candidate
 }
 
+#[derive(Debug, Clone, Copy)]
+struct TargetSamplingDiagnostics {
+    validated: bool,
+    closure_gap: f64,
+    median_spacing: f64,
+    max_spacing: f64,
+    max_normal_angle_jump: f64,
+}
+
+fn target_sampling_diagnostics(
+    targets: &[BasinTargetPoint],
+    config: &BasinApproximationConfig,
+) -> TargetSamplingDiagnostics {
+    let mut spacings = Vec::with_capacity(targets.len());
+    let mut max_normal_angle_jump = 0.0_f64;
+    for index in 0..targets.len() {
+        let current = targets[index];
+        let next = targets[(index + 1) % targets.len()];
+        spacings.push((next.x - current.x).hypot(next.y - current.y));
+        max_normal_angle_jump =
+            max_normal_angle_jump.max(circular_distance(current.theta(), next.theta()));
+    }
+    let closure_gap = spacings.last().copied().unwrap_or(f64::INFINITY);
+    let max_spacing = spacings.iter().copied().fold(0.0_f64, f64::max);
+    spacings.sort_by(f64::total_cmp);
+    let median_spacing = if spacings.is_empty() {
+        f64::INFINITY
+    } else if spacings.len() % 2 == 0 {
+        0.5 * (spacings[spacings.len() / 2 - 1] + spacings[spacings.len() / 2])
+    } else {
+        spacings[spacings.len() / 2]
+    };
+    let spacing_limit = (4.0 * median_spacing).max(config.target_position_radius);
+    let normal_jump_limit = config.target_angle_radius.max(0.5 * PI);
+    let validated = targets.len() >= 3
+        && median_spacing.is_finite()
+        && median_spacing > 0.0
+        && closure_gap <= spacing_limit
+        && max_spacing <= spacing_limit
+        && max_normal_angle_jump <= normal_jump_limit;
+
+    TargetSamplingDiagnostics {
+        validated,
+        closure_gap,
+        median_spacing,
+        max_spacing,
+        max_normal_angle_jump,
+    }
+}
+
 #[cfg(test)]
 #[allow(dead_code)]
 fn trapping_core(candidate: &[bool], graph: &TransitionGraph) -> Vec<bool> {
@@ -1467,6 +1630,7 @@ struct LazyExpansionResult {
     outer_can_grow: bool,
     inverse_frontier_cell_count: usize,
     inverse_left_domain: bool,
+    forward_consistency_rejection_count: usize,
 }
 
 fn expand_lazy_predecessors(
@@ -1500,6 +1664,7 @@ fn expand_lazy_predecessors(
     let mut inverse_left_domain = false;
     let mut completed_inner_levels = 0usize;
     let mut completed_outer_levels = 0usize;
+    let mut forward_consistency_rejection_count = 0usize;
 
     for level in 1..=expansion_limit {
         let mut possible_sources = HashSet::new();
@@ -1510,12 +1675,18 @@ fn expand_lazy_predecessors(
                 inverse_expanded[destination] = true;
                 inverse_frontier_cell_count += 1;
                 inverse_left_domain |= leaves_domain;
-                possible_sources.extend(candidates);
+                for source in candidates {
+                    ensure_forward_row(graph, grid, source, config)?;
+                    let reaches_destination = graph
+                        .row(source)
+                        .is_some_and(|row| row.contains_successor(destination));
+                    if reaches_destination {
+                        possible_sources.insert(source);
+                    } else {
+                        forward_consistency_rejection_count += 1;
+                    }
+                }
             }
-        }
-
-        for &source in &possible_sources {
-            ensure_forward_row(graph, grid, source, config)?;
         }
         let previous_outer_prefix = membership_prefix(node_count, |cell| {
             outer_levels[cell] >= 0 && outer_levels[cell] < level as i32
@@ -1575,11 +1746,18 @@ fn expand_lazy_predecessors(
             inverse_expanded[destination] = true;
             inverse_frontier_cell_count += 1;
             inverse_left_domain |= leaves_domain;
-            beyond_limit_sources.extend(candidates);
+            for source in candidates {
+                ensure_forward_row(graph, grid, source, config)?;
+                let reaches_destination = graph
+                    .row(source)
+                    .is_some_and(|row| row.contains_successor(destination));
+                if reaches_destination {
+                    beyond_limit_sources.insert(source);
+                } else {
+                    forward_consistency_rejection_count += 1;
+                }
+            }
         }
-    }
-    for &source in &beyond_limit_sources {
-        ensure_forward_row(graph, grid, source, config)?;
     }
     let final_outer_prefix = membership_prefix(node_count, |cell| outer_levels[cell] != UNREACHED)?;
     let outer_can_grow = beyond_limit_sources.into_iter().any(|source| {
@@ -1613,6 +1791,7 @@ fn expand_lazy_predecessors(
         outer_can_grow,
         inverse_frontier_cell_count,
         inverse_left_domain,
+        forward_consistency_rejection_count,
     })
 }
 
@@ -1662,6 +1841,8 @@ fn classify_stop_reason(
     reachable_domain_exit: bool,
     inverse_left_domain: bool,
     has_unresolved_cells: bool,
+    target_sampling_validated: bool,
+    local_contraction_verified: bool,
 ) -> BasinStopReason {
     if !converged {
         BasinStopReason::ResourceLimit
@@ -1671,12 +1852,16 @@ fn classify_stop_reason(
         BasinStopReason::DomainTruncated
     } else if has_unresolved_cells {
         BasinStopReason::ResolutionLimited
+    } else if !target_sampling_validated {
+        BasinStopReason::TargetSamplingUnverified
+    } else if !local_contraction_verified {
+        BasinStopReason::AttractionUnverified
     } else {
         BasinStopReason::FixedPointReached
     }
 }
 
-pub fn compute_henon_extended_basin(
+fn compute_henon_extended_basin_once(
     target_points: &[BasinTargetPoint],
     config: &BasinApproximationConfig,
 ) -> Result<BasinApproximationResult, String> {
@@ -1691,7 +1876,8 @@ pub fn compute_henon_extended_basin(
         .copied()
         .map(BasinTargetPoint::normalized)
         .collect::<Result<Vec<_>, _>>()?;
-    let grid = Grid3::new(config);
+    let target_sampling = target_sampling_diagnostics(&targets, config);
+    let grid = Grid3::refined(config)?;
     let candidate = target_candidate_cells(&grid, &targets, config);
     let candidate_target_cell_count = candidate.iter().filter(|&&value| value).count();
     if candidate_target_cell_count == 0 {
@@ -1706,6 +1892,15 @@ pub fn compute_henon_extended_basin(
     let seed = trapping_core_sparse(&candidate, &graph)?;
     let target_cell_count = seed.iter().filter(|&&value| value).count();
     let trapping_verified = target_cell_count > 0;
+    let local_contraction_upper_bound = trapping_verified.then(|| {
+        seed.iter()
+            .enumerate()
+            .filter(|(_, retained)| **retained)
+            .filter_map(|(source, _)| graph.row(source))
+            .map(|row| row.derivative_frobenius_upper)
+            .fold(0.0_f64, f64::max)
+    });
+    let local_contraction_verified = local_contraction_upper_bound.is_some_and(|bound| bound < 1.0);
 
     // A failed trapping-core proof invalidates the certified inner basin, but
     // it does not invalidate possible reachability.  In that case use the
@@ -1729,6 +1924,7 @@ pub fn compute_henon_extended_basin(
         outer_can_grow,
         inverse_frontier_cell_count,
         inverse_left_domain,
+        forward_consistency_rejection_count,
     } = expansion;
     let projection = project_levels(&grid, &inner_levels, &outer_levels);
 
@@ -1774,9 +1970,23 @@ pub fn compute_henon_extended_basin(
         reachable_domain_exit,
         inverse_left_domain,
         unresolved_cell_count > 0,
+        target_sampling.validated,
+        local_contraction_verified,
     );
+    let end_to_end_verified = converged
+        && trapping_verified
+        && target_sampling.validated
+        && local_contraction_verified
+        && boundary_contact_cell_count == 0
+        && !reachable_domain_exit
+        && !inverse_left_domain
+        && unresolved_cell_count == 0;
 
     Ok(BasinApproximationResult {
+        requested_grid_x: config.grid_x,
+        requested_grid_y: config.grid_y,
+        requested_grid_theta: config.grid_theta,
+        refinement_rounds: config.refinement_rounds,
         grid_x: grid.nx,
         grid_y: grid.ny,
         grid_theta: grid.nt,
@@ -1798,7 +2008,22 @@ pub fn compute_henon_extended_basin(
         transition_run_count: graph.run_count,
         evaluated_cell_count: graph.rows.len(),
         inverse_frontier_cell_count,
+        forward_consistency_rejection_count,
         trapping_verified,
+        local_contraction_upper_bound,
+        local_contraction_verified,
+        target_sampling_validated: target_sampling.validated,
+        target_sample_count: targets.len(),
+        target_closure_gap: target_sampling.closure_gap,
+        target_median_spacing: target_sampling.median_spacing,
+        target_max_spacing: target_sampling.max_spacing,
+        target_max_normal_angle_jump: target_sampling.max_normal_angle_jump,
+        previous_refinement_inner_area: None,
+        previous_refinement_outer_area: None,
+        refinement_inner_area_change: None,
+        refinement_outer_area_change: None,
+        refinement_stable: None,
+        end_to_end_verified,
         converged,
         expansion_limit: MAX_AUTOMATIC_EXPANSION_LEVELS,
         stop_reason,
@@ -1806,6 +2031,45 @@ pub fn compute_henon_extended_basin(
         outer_area,
         unresolved_area,
     })
+}
+
+pub fn compute_henon_extended_basin(
+    target_points: &[BasinTargetPoint],
+    config: &BasinApproximationConfig,
+) -> Result<BasinApproximationResult, String> {
+    let mut refined = compute_henon_extended_basin_once(target_points, config)?;
+    if config.refinement_rounds == 0 {
+        // A single grid can certify the represented box recurrence, but it
+        // cannot satisfy the end-to-end nested-resolution requirement.
+        refined.end_to_end_verified = false;
+        return Ok(refined);
+    }
+
+    let mut previous_config = config.clone();
+    previous_config.refinement_rounds -= 1;
+    let previous = compute_henon_extended_basin_once(target_points, &previous_config)?;
+    let inner_change = (refined.inner_area - previous.inner_area).abs();
+    let outer_change = (refined.outer_area - previous.outer_area).abs();
+    let domain_area =
+        (config.bounds.x_max - config.bounds.x_min) * (config.bounds.y_max - config.bounds.y_min);
+    let stability_tolerance = (0.01 * domain_area).max(2.0 * refined.dx * refined.dy);
+    refined.previous_refinement_inner_area = Some(previous.inner_area);
+    refined.previous_refinement_outer_area = Some(previous.outer_area);
+    refined.refinement_inner_area_change = Some(inner_change);
+    refined.refinement_outer_area_change = Some(outer_change);
+    refined.refinement_stable = Some(
+        refined.converged
+            && previous.converged
+            && inner_change <= stability_tolerance
+            && outer_change <= stability_tolerance,
+    );
+    if refined.refinement_stable != Some(true) {
+        refined.end_to_end_verified = false;
+        if refined.stop_reason == BasinStopReason::FixedPointReached {
+            refined.stop_reason = BasinStopReason::ResolutionLimited;
+        }
+    }
+    Ok(refined)
 }
 
 #[wasm_bindgen(js_name = "computeHenonExtendedBasin")]
@@ -1843,6 +2107,7 @@ mod tests {
             grid_theta: 16,
             target_position_radius: 0.25,
             target_angle_radius: 0.5,
+            refinement_rounds: 0,
         }
     }
 
@@ -1860,16 +2125,82 @@ mod tests {
         invalid = config();
         invalid.grid_theta = 4;
         assert!(invalid.validate().is_err());
+        invalid = config();
+        invalid.refinement_rounds = MAX_REFINEMENT_ROUNDS + 1;
+        assert!(invalid
+            .validate()
+            .unwrap_err()
+            .contains("refinement rounds"));
+    }
+
+    #[test]
+    fn persistent_refinement_doubles_every_state_axis() {
+        let mut configuration = config();
+        configuration.refinement_rounds = 1;
+        let grid = Grid3::refined(&configuration).unwrap();
+        assert_eq!((grid.nx, grid.ny, grid.nt), (16, 16, 32));
+        assert_eq!(
+            grid.cell_count(),
+            8 * Grid3::new(&configuration).cell_count()
+        );
+    }
+
+    #[test]
+    fn target_sampling_checks_closure_spacing_and_normal_continuity() {
+        let square = [
+            BasinTargetPoint {
+                x: 0.0,
+                y: 0.0,
+                nx: -1.0,
+                ny: 0.0,
+            },
+            BasinTargetPoint {
+                x: 1.0,
+                y: 0.0,
+                nx: 0.0,
+                ny: -1.0,
+            },
+            BasinTargetPoint {
+                x: 1.0,
+                y: 1.0,
+                nx: 1.0,
+                ny: 0.0,
+            },
+            BasinTargetPoint {
+                x: 0.0,
+                y: 1.0,
+                nx: 0.0,
+                ny: 1.0,
+            },
+        ];
+        assert!(target_sampling_diagnostics(&square, &config()).validated);
+
+        let mut discontinuous = square;
+        discontinuous[2].nx = 0.0;
+        discontinuous[2].ny = 1.0;
+        assert!(!target_sampling_diagnostics(&discontinuous, &config()).validated);
+    }
+
+    #[test]
+    fn transition_rows_expose_a_finite_rigorous_lipschitz_bound() {
+        let configuration = config();
+        let grid = Grid3::new(&configuration);
+        let row = compute_forward_row(&grid, grid.id(4, 4, 8), &configuration).unwrap();
+        assert!(row.derivative_frobenius_upper.is_finite());
+        assert!(row.derivative_frobenius_upper > 0.0);
+        for destination in row.successor_ids() {
+            assert!(row.contains_successor(destination));
+        }
     }
 
     #[test]
     fn unfinished_automatic_expansion_reports_the_internal_resource_limit() {
         assert_eq!(
-            classify_stop_reason(false, false, false, false, false, false),
+            classify_stop_reason(false, false, false, false, false, false, false, false),
             BasinStopReason::ResourceLimit
         );
         assert_eq!(
-            classify_stop_reason(true, false, false, false, false, true),
+            classify_stop_reason(true, false, false, false, false, true, false, false),
             BasinStopReason::NoTrappingCore
         );
     }
@@ -2199,6 +2530,7 @@ mod tests {
             grid_theta: 8,
             target_position_radius: 100.0,
             target_angle_radius: PI,
+            refinement_rounds: 0,
         };
         let result = compute_henon_extended_basin(
             &[BasinTargetPoint {
@@ -2220,6 +2552,46 @@ mod tests {
         assert_eq!(result.inner_cell_count, result.outer_cell_count);
         assert_eq!(result.unresolved_cell_count, 0);
         assert_eq!(result.inner_levels.len(), 128);
+    }
+
+    #[test]
+    fn automatic_refinement_reports_a_nested_grid_area_study() {
+        let mut configuration = BasinApproximationConfig {
+            a: 0.0,
+            b: 0.5,
+            epsilon: 0.0,
+            bounds: BasinBounds {
+                x_min: 0.0,
+                x_max: 2.0,
+                y_min: -1.0,
+                y_max: 1.0,
+            },
+            grid_x: 4,
+            grid_y: 4,
+            grid_theta: 8,
+            target_position_radius: 100.0,
+            target_angle_radius: PI,
+            refinement_rounds: 1,
+        };
+        let target = [BasinTargetPoint {
+            x: 1.0,
+            y: 0.0,
+            nx: 1.0,
+            ny: 0.0,
+        }];
+        let result = compute_henon_extended_basin(&target, &configuration).unwrap();
+        assert_eq!(
+            (result.grid_x, result.grid_y, result.grid_theta),
+            (8, 8, 16)
+        );
+        assert_eq!(result.previous_refinement_inner_area, Some(4.0));
+        assert_eq!(result.previous_refinement_outer_area, Some(4.0));
+        assert_eq!(result.refinement_stable, Some(true));
+
+        configuration.refinement_rounds = 0;
+        let coarse = compute_henon_extended_basin(&target, &configuration).unwrap();
+        assert_eq!(coarse.refinement_stable, None);
+        assert!(!coarse.end_to_end_verified);
     }
 
     #[test]

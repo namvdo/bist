@@ -23,7 +23,7 @@ import {
 } from './utils/trajectoryState';
 import { buildGeometricOffsetSeed } from './utils/geometricOffsetSeed';
 import { buildBasinTarget } from './utils/basinTarget';
-import { BASIN_COMPUTE_DEFAULTS, BASIN_LAYER_STYLES } from './utils/basinDisplay';
+import { basinLayerOpacity, BASIN_COMPUTE_DEFAULTS, BASIN_LAYER_STYLES } from './utils/basinDisplay';
 import { describeBasinComputationError } from './utils/basinError';
 import { createCancelableWorkerTask, isAbortError } from './utils/cancelableWorkerTask';
 
@@ -314,7 +314,8 @@ const SetValuedViz = () => {
         isComputing: false,
         result: null,
         error: null,
-        notice: null
+        notice: null,
+        settings: { ...BASIN_COMPUTE_DEFAULTS }
     });
 
     const geometricOffsetSeed = useMemo(
@@ -329,10 +330,17 @@ const SetValuedViz = () => {
     const basinTarget = useMemo(
         () => buildBasinTarget(
             manifoldState.rawManifolds?.length > 0 ? manifoldState.rawManifolds : manifoldState.manifolds,
-            2000,
+            basinState.settings.targetSamples,
             { a: params.a, b: params.b, epsilon: params.epsilon }
         ),
-        [manifoldState.rawManifolds, manifoldState.manifolds, params.a, params.b, params.epsilon]
+        [
+            manifoldState.rawManifolds,
+            manifoldState.manifolds,
+            basinState.settings.targetSamples,
+            params.a,
+            params.b,
+            params.epsilon
+        ]
     );
 
     const [filters, setFilters] = useState({
@@ -1751,11 +1759,12 @@ const SetValuedViz = () => {
                         y_min: viewRange.yMin,
                         y_max: viewRange.yMax
                     },
-                    grid_x: BASIN_COMPUTE_DEFAULTS.gridXY,
-                    grid_y: BASIN_COMPUTE_DEFAULTS.gridXY,
-                    grid_theta: BASIN_COMPUTE_DEFAULTS.gridTheta,
-                    target_position_radius: BASIN_COMPUTE_DEFAULTS.targetPositionRadius,
-                    target_angle_radius: BASIN_COMPUTE_DEFAULTS.targetAngleRadius
+                    grid_x: basinState.settings.gridXY,
+                    grid_y: basinState.settings.gridXY,
+                    grid_theta: basinState.settings.gridTheta,
+                    refinement_rounds: basinState.settings.refinementRounds,
+                    target_position_radius: basinState.settings.targetPositionRadius,
+                    target_angle_radius: basinState.settings.targetAngleRadius
                 }
             });
             setBasinState(previous => ({ ...previous, isComputing: false, result, error: null, notice: null }));
@@ -1783,6 +1792,7 @@ const SetValuedViz = () => {
         params.a,
         params.b,
         params.epsilon,
+        basinState.settings,
         runBasinComputeTask,
         viewRange
     ]);
@@ -1877,24 +1887,33 @@ const SetValuedViz = () => {
                     basinState.result.dx * 0.985,
                     basinState.result.dy * 0.985
                 );
-                const material = new THREE.MeshBasicMaterial({
-                    color: style.color,
-                    transparent: true,
-                    opacity: style.opacity,
-                    depthWrite: false,
-                    side: THREE.DoubleSide,
-                    toneMapped: false
+                const buckets = Array.from({ length: 4 }, () => []);
+                cells.forEach(item => {
+                    const bucket = Math.min(3, Math.floor(Math.max(0, Math.min(0.999999, item.coverage)) * 4));
+                    buckets[bucket].push(item);
                 });
-                const mesh = new THREE.InstancedMesh(geometry, material, cells.length);
-                const matrix = new THREE.Matrix4();
-                cells.forEach(({ cell }, index) => {
-                    matrix.makeTranslation(cell.x, cell.y, style.z);
-                    mesh.setMatrixAt(index, matrix);
+                buckets.forEach((bucketCells, bucketIndex) => {
+                    if (bucketCells.length === 0) return;
+                    const representativeCoverage = (bucketIndex + 0.5) / buckets.length;
+                    const material = new THREE.MeshBasicMaterial({
+                        color: style.color,
+                        transparent: true,
+                        opacity: basinLayerOpacity(style, representativeCoverage),
+                        depthWrite: false,
+                        side: THREE.DoubleSide,
+                        toneMapped: false
+                    });
+                    const mesh = new THREE.InstancedMesh(geometry, material, bucketCells.length);
+                    const matrix = new THREE.Matrix4();
+                    bucketCells.forEach(({ cell }, index) => {
+                        matrix.makeTranslation(cell.x, cell.y, style.z);
+                        mesh.setMatrixAt(index, matrix);
+                    });
+                    mesh.instanceMatrix.needsUpdate = true;
+                    mesh.renderOrder = style.renderOrder;
+                    mesh.userData.type = 'basin';
+                    scene.add(mesh);
                 });
-                mesh.instanceMatrix.needsUpdate = true;
-                mesh.renderOrder = style.renderOrder;
-                mesh.userData.type = 'basin';
-                scene.add(mesh);
             };
 
             addBasinLayer(

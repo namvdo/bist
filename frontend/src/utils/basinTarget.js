@@ -16,6 +16,103 @@ const cleanExtendedPoints = (points) => (points || [])
 
 const positions = points => points.map(([x, y]) => [x, y]);
 
+const circularDistance = (left, right) => {
+  const period = 2 * Math.PI;
+  const difference = Math.abs(((left - right) % period + period) % period);
+  return Math.min(difference, period - difference);
+};
+
+const median = values => {
+  if (values.length === 0) return Infinity;
+  const ordered = [...values].sort((left, right) => left - right);
+  const middle = Math.floor(ordered.length / 2);
+  return ordered.length % 2 === 0
+    ? 0.5 * (ordered[middle - 1] + ordered[middle])
+    : ordered[middle];
+};
+
+const targetNeedsGeometricRepair = points => {
+  if (points.length < 3) return true;
+  const lengths = points.map((point, index) => {
+    const next = points[(index + 1) % points.length];
+    return Math.hypot(next[0] - point[0], next[1] - point[1]);
+  });
+  const typicalSpacing = median(lengths.filter(length => length > 1e-12));
+  const hasSpacingGap = !Number.isFinite(typicalSpacing)
+    || Math.max(...lengths) > Math.max(8 * typicalSpacing, 1e-10);
+  const hasNormalJump = points.some((point, index) => {
+    const next = points[(index + 1) % points.length];
+    return circularDistance(Math.atan2(point[3], point[2]), Math.atan2(next[3], next[2])) > Math.PI / 2;
+  });
+  return hasSpacingGap || hasNormalJump;
+};
+
+const resampleClosedBoundary = (boundary, pointCount) => {
+  if (boundary.length < 3 || pointCount < 3) return boundary;
+  const segments = boundary.map((point, index) => {
+    const next = boundary[(index + 1) % boundary.length];
+    return { point, next, length: Math.hypot(next[0] - point[0], next[1] - point[1]) };
+  }).filter(segment => segment.length > 1e-12);
+  const perimeter = segments.reduce((sum, segment) => sum + segment.length, 0);
+  if (!Number.isFinite(perimeter) || perimeter <= 1e-12) return boundary;
+
+  const result = [];
+  let segmentIndex = 0;
+  let segmentStart = 0;
+  for (let index = 0; index < pointCount; index += 1) {
+    const targetDistance = perimeter * index / pointCount;
+    while (segmentIndex + 1 < segments.length
+      && segmentStart + segments[segmentIndex].length < targetDistance) {
+      segmentStart += segments[segmentIndex].length;
+      segmentIndex += 1;
+    }
+    const segment = segments[segmentIndex];
+    const fraction = Math.max(0, Math.min(1, (targetDistance - segmentStart) / segment.length));
+    result.push([
+      segment.point[0] + fraction * (segment.next[0] - segment.point[0]),
+      segment.point[1] + fraction * (segment.next[1] - segment.point[1])
+    ]);
+  }
+  return result;
+};
+
+const resampleExtendedBoundary = (boundary, pointCount) => {
+  if (boundary.length < 3 || pointCount < 3) return boundary;
+  const positionsOnly = positions(boundary);
+  const resampledPositions = resampleClosedBoundary(positionsOnly, pointCount);
+  const segments = boundary.map((point, index) => {
+    const next = boundary[(index + 1) % boundary.length];
+    return { point, next, length: Math.hypot(next[0] - point[0], next[1] - point[1]) };
+  }).filter(segment => segment.length > 1e-12);
+  const perimeter = segments.reduce((sum, segment) => sum + segment.length, 0);
+  if (!Number.isFinite(perimeter) || perimeter <= 1e-12) return boundary;
+
+  const result = [];
+  let segmentIndex = 0;
+  let segmentStart = 0;
+  for (let index = 0; index < pointCount; index += 1) {
+    const targetDistance = perimeter * index / pointCount;
+    while (segmentIndex + 1 < segments.length
+      && segmentStart + segments[segmentIndex].length < targetDistance) {
+      segmentStart += segments[segmentIndex].length;
+      segmentIndex += 1;
+    }
+    const segment = segments[segmentIndex];
+    const fraction = Math.max(0, Math.min(1, (targetDistance - segmentStart) / segment.length));
+    const theta = Math.atan2(segment.point[3], segment.point[2]);
+    const nextTheta = Math.atan2(segment.next[3], segment.next[2]);
+    const angularIncrement = Math.atan2(Math.sin(nextTheta - theta), Math.cos(nextTheta - theta));
+    const interpolatedTheta = theta + fraction * angularIncrement;
+    result.push([
+      resampledPositions[index][0],
+      resampledPositions[index][1],
+      Math.cos(interpolatedTheta),
+      Math.sin(interpolatedTheta)
+    ]);
+  }
+  return result;
+};
+
 const completeNegativePhase = (points, eigenvalue, params) => {
   if (!(eigenvalue < 0) || points.length < 3) return null;
   const image = points.map(point => forwardBoundaryPoint(point, params));
@@ -70,10 +167,21 @@ export const buildBasinTarget = (manifolds, maxPoints = 2000, params = {}) => {
   }
   if (!selected || selected.length < 3) return [];
 
+  if (targetNeedsGeometricRepair(selected)) {
+    selected = resampleExtendedBoundary(selected, Math.min(maxPoints, Math.max(64, selected.length)));
+  }
+
   const stride = Math.max(1, Math.ceil(selected.length / maxPoints));
   return selected
     .filter((_, index) => index % stride === 0)
     .map(([x, y, nx, ny]) => ({ x, y, nx, ny }));
 };
 
-export { cleanExtendedPoints, completeNegativePhase, deriveExtendedBoundary };
+export {
+  cleanExtendedPoints,
+  completeNegativePhase,
+  deriveExtendedBoundary,
+  resampleClosedBoundary,
+  resampleExtendedBoundary,
+  targetNeedsGeometricRepair
+};

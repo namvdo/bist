@@ -613,6 +613,23 @@ body {
 .basin-visibility-row .t-switch.on .t-track { background: #ffd400; border-color: #ffd400; }
 .basin-visibility-row .t-switch.on .t-thumb { background: #181511; }
 .basin-visibility-row .t-switch:has(input:focus-visible) .t-track { outline-color: #ffd400; }
+.basin-accuracy { margin-top: 5px; padding-top: 7px; border-top: 1px solid var(--line); }
+.basin-control-heading { color: #fff; font-size: 10.5px; font-weight: 700; }
+.basin-presets { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; margin-top: 6px; }
+.basin-preset { padding: 4px 5px; border: 1px solid var(--line-hi); border-radius: 4px; background: transparent; color: #fff; font: 600 10px var(--font-sans); cursor: pointer; }
+.basin-preset:hover:not(:disabled) { border-color: #ffd400; color: #ffd400; }
+.basin-preset.active { border-color: #ffd400; background: rgba(255,212,0,.12); color: #ffd400; }
+.basin-preset:disabled { opacity: .55; cursor: default; }
+.basin-accuracy-details { margin-top: 6px; }
+.basin-control-grid { display: grid; grid-template-columns: minmax(0, 1fr) 82px; gap: 5px 8px; align-items: center; margin-top: 7px; }
+.basin-control-grid label { color: #fff; font-size: 10px; line-height: 1.25; }
+.basin-control-grid input { width: 100%; box-sizing: border-box; padding: 4px 5px; border: 1px solid var(--line-hi); border-radius: 4px; outline: none; background: var(--surface); color: #fff; font: 11px var(--font-mono); }
+.basin-control-grid input:focus { border-color: #ffd400; }
+.basin-control-grid input:disabled { opacity: .58; }
+.basin-target-heading { margin-top: 10px; }
+.basin-grid-estimate { margin-top: 7px; color: #fff; font: 9.5px/1.4 var(--font-mono); }
+.basin-control-warning { margin-top: 5px; color: #ffe38a; font-size: 9.5px; line-height: 1.35; }
+.basin-control-error { margin-top: 5px; color: #ffdada; font-size: 9.5px; line-height: 1.35; }
 .basin-compute { width: 100%; margin-top: 8px; border-color: #806b00; background: rgba(255,212,0,.11); color: #ffd400; }
 .basin-compute:hover:not(:disabled) { border-color: #ffd400; background: rgba(255,212,0,.18); }
 .basin-note { margin-top: 7px; color: #ffffff; font-size: 10.5px; line-height: 1.45; }

@@ -28,7 +28,8 @@ export const Viewport = ({ type, canvasRef, tooltip, manifoldState, geometricOff
         {manifoldState.showUnstableManifold && <div className="lg-item"><div className="lg-line" style={{ background: '#5b88b5' }}></div>Unstable manifold</div>}
         {manifoldState.showStableManifold && <div className="lg-item"><div className="lg-line" style={{ background: '#b8904a' }}></div>Stable manifold</div>}
         {geometricOffsetState?.showContours && geometricOffsetState?.result && <div className="lg-item"><div className="lg-line" style={{ background: '#3f9186' }}></div>Geometric ε-offsets</div>}
-        {basinState?.showBasin && basinState?.result && <div className="lg-item"><div className="lg-box" style={{ background: BASIN_LAYER_STYLES.inner.color }}></div>Basin approximation</div>}
+        {basinState?.showBasin && basinState?.result?.inner_cell_count > 0 && <div className="lg-item"><div className="lg-box" style={{ background: BASIN_LAYER_STYLES.inner.color }}></div>Verified finite capture</div>}
+        {basinState?.showBasin && basinState?.result?.unresolved_cell_count > 0 && <div className="lg-item"><div className="lg-box" style={{ background: BASIN_LAYER_STYLES.outer.color, opacity: BASIN_LAYER_STYLES.outer.opacity }}></div>Possible / unresolved</div>}
         {manifoldState.showOrbits && (
           <>
             <div className="lg-item"><div className="lg-dot" style={{ background: '#b8904a' }}></div>Saddle</div>
